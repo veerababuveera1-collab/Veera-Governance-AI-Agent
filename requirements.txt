@@ -1,0 +1,8 @@
+streamlit
+requests
+faiss-cpu
+sentence-transformers
+pypdf
+speechrecognition
+pyttsx3
+numpy
