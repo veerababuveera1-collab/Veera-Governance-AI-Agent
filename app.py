@@ -5,10 +5,10 @@ from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
 
 # ======================
-# AUTH (demo users)
+# AUTH
 # ======================
 
-USERS = {"admin": "1234", "veera": "ai2026"}
+USERS = {"admin":"1234","veera":"ai2026"}
 
 def login():
     st.subheader("🔐 Login")
@@ -38,7 +38,7 @@ URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "meta-llama/llama-3-70b-instruct"
 
 # ======================
-# EMBEDDINGS (cached)
+# EMBEDDINGS
 # ======================
 
 @st.cache_resource
@@ -48,22 +48,22 @@ def load_embedder():
 embedder = load_embedder()
 
 # ======================
-# VECTOR DATABASE
+# VECTOR MEMORY
 # ======================
 
 DIM = 384
 index = faiss.IndexFlatIP(DIM)
 doc_chunks = []
 
-def smart_chunks(text, size=400, overlap=60):
+def chunk_text(text, size=400, overlap=60):
     words = text.split()
-    chunks = []
-    for i in range(0, len(words), size - overlap):
-        chunks.append(" ".join(words[i:i + size]))
-    return chunks
+    out=[]
+    for i in range(0,len(words),size-overlap):
+        out.append(" ".join(words[i:i+size]))
+    return out
 
 def add_to_memory(text):
-    chunks = smart_chunks(text)
+    chunks = chunk_text(text)
     vecs = embedder.encode(chunks, normalize_embeddings=True)
     index.add(vecs.astype("float32"))
     doc_chunks.extend(chunks)
@@ -76,68 +76,84 @@ def search_memory(q, k=4):
     return "\n".join(doc_chunks[i] for i in ids[0])
 
 # ======================
-# LLM CALL (safe retry)
+# LLM CALL
 # ======================
 
-def call_ai(messages, retries=2):
-    for _ in range(retries):
-        try:
-            r = requests.post(
-                URL,
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={"model": MODEL, "messages": messages},
-                timeout=60
-            )
-            return r.json()["choices"][0]["message"]["content"]
-        except:
-            time.sleep(1)
-    return "⚠️ AI service unavailable"
+def call_ai(messages):
+    r = requests.post(
+        URL,
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={"model": MODEL, "messages": messages},
+        timeout=60
+    )
+    return r.json()["choices"][0]["message"]["content"]
 
 # ======================
-# MULTI-AGENT BRAIN
+# MULTI AGENT (PLANNING)
 # ======================
 
 AGENTS = {
-    "planner": "Break into clear steps",
-    "researcher": "Give insights and facts",
-    "architect": "Design scalable solution",
-    "qa": "Find risks and flaws"
+    "planner":"Break into steps",
+    "researcher":"Provide technical insights",
+    "architect":"Design scalable system",
+    "qa":"Find risks and gaps"
 }
 
 def agent_workflow(q, context):
-    outputs = {}
+    outputs=[]
+    for role in AGENTS.values():
+        outputs.append(call_ai([
+            {"role":"system","content":role},
+            {"role":"user","content":context+"\n"+q}
+        ]))
 
-    for name, role in AGENTS.items():
-        outputs[name] = call_ai([
-            {"role": "system", "content": role},
-            {"role": "user", "content": context + "\n" + q}
-        ])
+    merged="\n".join(outputs)
 
-    merged = f"""
-Planner: {outputs['planner']}
-Researcher: {outputs['researcher']}
-Architect: {outputs['architect']}
-QA: {outputs['qa']}
-"""
     return call_ai([
-        {"role": "system", "content": "Combine into enterprise-grade answer"},
-        {"role": "user", "content": merged}
+        {"role":"system","content":"Create enterprise-grade final solution"},
+        {"role":"user","content":merged}
     ])
 
 # ======================
-# CLOUD SAFE VOICE OUTPUT
+# CLOUD VOICE
 # ======================
 
-def speak_browser(text):
+def speak(text):
     components.html(f"""
     <script>
-    const msg = new SpeechSynthesisUtterance({repr(text)});
-    window.speechSynthesis.speak(msg);
+    const m = new SpeechSynthesisUtterance({repr(text)});
+    speechSynthesis.speak(m);
     </script>
-    """, height=0)
+    """,height=0)
+
+# ======================
+# CODE AGENT TEAM
+# ======================
+
+CODE_AGENTS = {
+    "architect":"Design clean software structure",
+    "generator":"Write complete working Python/Streamlit code",
+    "bugfix":"Fix all bugs",
+    "optimizer":"Improve performance & cloud stability"
+}
+
+def run_code_agents(task):
+    outputs=[]
+    for role in CODE_AGENTS.values():
+        outputs.append(call_ai([
+            {"role":"system","content":role},
+            {"role":"user","content":task}
+        ]))
+
+    merged="\n".join(outputs)
+
+    return call_ai([
+        {"role":"system","content":"Merge into production-ready code"},
+        {"role":"user","content":merged}
+    ])
 
 # ======================
 # UI
@@ -146,14 +162,20 @@ def speak_browser(text):
 st.set_page_config("Veera Enterprise AI Platform", layout="wide")
 st.title("🚀 Veera Enterprise AI Platform")
 
-tabs = st.tabs(["💬 AI Chat", "📄 Document Memory", "🎤 Voice Reply", "⚙️ Automation"])
+tabs = st.tabs([
+    "💬 AI Chat",
+    "📄 Document Memory",
+    "🎤 Voice Reply",
+    "⚙️ Automation",
+    "💻 Code Lab"
+])
 
-# -------- CHAT --------
+# ---------- CHAT ----------
 
 with tabs[0]:
 
     if "chat" not in st.session_state:
-        st.session_state.chat = []
+        st.session_state.chat=[]
 
     for m in st.session_state.chat:
         with st.chat_message(m["role"]):
@@ -166,39 +188,35 @@ with tabs[0]:
         ans = agent_workflow(q, mem)
 
         st.session_state.chat += [
-            {"role": "user", "content": q},
-            {"role": "assistant", "content": ans}
+            {"role":"user","content":q},
+            {"role":"assistant","content":ans}
         ]
         st.rerun()
 
-# -------- DOCUMENT RAG --------
+# ---------- DOCUMENT MEMORY ----------
 
 with tabs[1]:
 
     f = st.file_uploader("Upload PDF", type="pdf")
 
     if f:
-        text = "".join(
-            p.extract_text() for p in PdfReader(f).pages if p.extract_text()
-        )
+        text = "".join(p.extract_text() for p in PdfReader(f).pages if p.extract_text())
         add_to_memory(text)
-        st.success("📚 Document stored in vector memory")
+        st.success("📚 Document stored in AI memory")
 
-# -------- VOICE OUTPUT --------
+# ---------- VOICE ----------
 
 with tabs[2]:
 
-    st.info("Type → AI answers + speaks (cloud safe)")
+    vq = st.text_input("Ask for voice reply")
 
-    voice_q = st.text_input("Type your question for voice reply")
-
-    if voice_q:
-        mem = search_memory(voice_q)
-        ans = agent_workflow(voice_q, mem)
+    if vq:
+        mem = search_memory(vq)
+        ans = agent_workflow(vq, mem)
         st.markdown(ans)
-        speak_browser(ans)
+        speak(ans)
 
-# -------- AUTOMATION --------
+# ---------- AUTOMATION ----------
 
 with tabs[3]:
 
@@ -206,10 +224,27 @@ with tabs[3]:
 
     if st.button("Run Automation"):
         mem = search_memory(task)
-        result = agent_workflow(task, mem)
-        st.markdown(result)
+        res = agent_workflow(task, mem)
+        st.markdown(res)
 
-# -------- LOGOUT --------
+# ---------- CODE LAB ----------
+
+with tabs[4]:
+
+    st.subheader("💻 Multi-Agent Code Engineering Lab")
+
+    code_task = st.text_area(
+        "Describe code you want",
+        placeholder="Create Streamlit UAV command center with real-time dashboard..."
+    )
+
+    if st.button("🚀 Generate Production Code"):
+        with st.spinner("AI engineering team working..."):
+            code = run_code_agents(code_task)
+
+        st.code(code, language="python")
+
+# ---------- LOGOUT ----------
 
 if st.sidebar.button("Logout"):
     st.session_state.clear()
