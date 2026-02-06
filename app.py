@@ -1,13 +1,12 @@
 import streamlit as st
 import requests, os, time, faiss, numpy as np
-import speech_recognition as sr
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
 
-# =======================
-# AUTH (simple demo)
-# =======================
+# ======================
+# AUTH (demo users)
+# ======================
 
 USERS = {"admin": "1234", "veera": "ai2026"}
 
@@ -26,17 +25,21 @@ if "user" not in st.session_state:
     login()
     st.stop()
 
-# =======================
+# ======================
 # CONFIG
-# =======================
+# ======================
 
 API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not API_KEY:
+    st.error("Missing OPENROUTER_API_KEY")
+    st.stop()
+
 URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "meta-llama/llama-3-70b-instruct"
 
-# =======================
-# EMBEDDING (cached)
-# =======================
+# ======================
+# EMBEDDINGS (cached)
+# ======================
 
 @st.cache_resource
 def load_embedder():
@@ -44,25 +47,25 @@ def load_embedder():
 
 embedder = load_embedder()
 
-# =======================
-# VECTOR DB (FAST)
-# =======================
+# ======================
+# VECTOR DATABASE
+# ======================
 
 DIM = 384
 index = faiss.IndexFlatIP(DIM)
 doc_chunks = []
 
-def smart_chunks(text, size=400, overlap=50):
+def smart_chunks(text, size=400, overlap=60):
     words = text.split()
-    out = []
+    chunks = []
     for i in range(0, len(words), size - overlap):
-        out.append(" ".join(words[i:i + size]))
-    return out
+        chunks.append(" ".join(words[i:i + size]))
+    return chunks
 
 def add_to_memory(text):
     chunks = smart_chunks(text)
-    vectors = embedder.encode(chunks, normalize_embeddings=True)
-    index.add(vectors.astype("float32"))
+    vecs = embedder.encode(chunks, normalize_embeddings=True)
+    index.add(vecs.astype("float32"))
     doc_chunks.extend(chunks)
 
 def search_memory(q, k=4):
@@ -72,9 +75,9 @@ def search_memory(q, k=4):
     _, ids = index.search(qv, k)
     return "\n".join(doc_chunks[i] for i in ids[0])
 
-# =======================
-# LLM CALL (safe)
-# =======================
+# ======================
+# LLM CALL (safe retry)
+# ======================
 
 def call_ai(messages, retries=2):
     for _ in range(retries):
@@ -91,28 +94,29 @@ def call_ai(messages, retries=2):
             return r.json()["choices"][0]["message"]["content"]
         except:
             time.sleep(1)
-    return "⚠️ AI temporarily unavailable"
+    return "⚠️ AI service unavailable"
 
-# =======================
-# MULTI AGENT BRAIN
-# =======================
+# ======================
+# MULTI-AGENT BRAIN
+# ======================
 
 AGENTS = {
-    "planner": "Break the problem into clear steps",
-    "researcher": "Provide insights and evidence",
+    "planner": "Break into clear steps",
+    "researcher": "Give insights and facts",
     "architect": "Design scalable solution",
-    "qa": "Find risks and edge cases"
+    "qa": "Find risks and flaws"
 }
 
 def agent_workflow(q, context):
     outputs = {}
-    for a, prompt in AGENTS.items():
-        outputs[a] = call_ai([
-            {"role": "system", "content": prompt},
+
+    for name, role in AGENTS.items():
+        outputs[name] = call_ai([
+            {"role": "system", "content": role},
             {"role": "user", "content": context + "\n" + q}
         ])
 
-    merge = f"""
+    merged = f"""
 Planner: {outputs['planner']}
 Researcher: {outputs['researcher']}
 Architect: {outputs['architect']}
@@ -120,37 +124,31 @@ QA: {outputs['qa']}
 """
     return call_ai([
         {"role": "system", "content": "Combine into enterprise-grade answer"},
-        {"role": "user", "content": merge}
+        {"role": "user", "content": merged}
     ])
 
-# =======================
+# ======================
 # CLOUD SAFE VOICE OUTPUT
-# =======================
+# ======================
 
 def speak_browser(text):
     components.html(f"""
     <script>
-    var msg = new SpeechSynthesisUtterance({repr(text)});
+    const msg = new SpeechSynthesisUtterance({repr(text)});
     window.speechSynthesis.speak(msg);
     </script>
     """, height=0)
 
-def listen():
-    r = sr.Recognizer()
-    with sr.Microphone() as s:
-        audio = r.listen(s)
-        return r.recognize_google(audio)
-
-# =======================
+# ======================
 # UI
-# =======================
+# ======================
 
-st.set_page_config("Enterprise AI Platform", layout="wide")
+st.set_page_config("Veera Enterprise AI Platform", layout="wide")
 st.title("🚀 Veera Enterprise AI Platform")
 
-tabs = st.tabs(["💬 AI Chat", "📄 Document Memory", "🎤 Voice AI", "⚙️ Automation"])
+tabs = st.tabs(["💬 AI Chat", "📄 Document Memory", "🎤 Voice Reply", "⚙️ Automation"])
 
-# ---------------- CHAT ----------------
+# -------- CHAT --------
 
 with tabs[0]:
 
@@ -173,47 +171,45 @@ with tabs[0]:
         ]
         st.rerun()
 
-# ---------------- DOC RAG ----------------
+# -------- DOCUMENT RAG --------
 
 with tabs[1]:
 
     f = st.file_uploader("Upload PDF", type="pdf")
 
     if f:
-        txt = "".join(p.extract_text() for p in PdfReader(f).pages if p.extract_text())
-        add_to_memory(txt)
-        st.success("📚 Document stored in vector memory!")
+        text = "".join(
+            p.extract_text() for p in PdfReader(f).pages if p.extract_text()
+        )
+        add_to_memory(text)
+        st.success("📚 Document stored in vector memory")
 
-# ---------------- VOICE ----------------
+# -------- VOICE OUTPUT --------
 
 with tabs[2]:
 
-    st.info("🎙 Speak → AI answers with voice + text")
+    st.info("Type → AI answers + speaks (cloud safe)")
 
-    if st.button("Speak now"):
-        q = listen()
-        st.write("You said:", q)
+    voice_q = st.text_input("Type your question for voice reply")
 
-        mem = search_memory(q)
-        ans = agent_workflow(q, mem)
-
+    if voice_q:
+        mem = search_memory(voice_q)
+        ans = agent_workflow(voice_q, mem)
         st.markdown(ans)
         speak_browser(ans)
 
-# ---------------- AUTOMATION ----------------
+# -------- AUTOMATION --------
 
 with tabs[3]:
 
-    st.subheader("🤖 Agent Automation Task")
+    task = st.text_area("Describe task for AI agents")
 
-    task = st.text_area("Describe task for agents")
-
-    if st.button("Run Agents"):
+    if st.button("Run Automation"):
         mem = search_memory(task)
-        res = agent_workflow(task, mem)
-        st.markdown(res)
+        result = agent_workflow(task, mem)
+        st.markdown(result)
 
-# ---------------- LOGOUT ----------------
+# -------- LOGOUT --------
 
 if st.sidebar.button("Logout"):
     st.session_state.clear()
