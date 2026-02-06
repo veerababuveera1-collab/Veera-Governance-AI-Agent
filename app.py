@@ -1,27 +1,29 @@
-import gradio as gr
+import streamlit as st
 import requests
 import os
 
-# ==============================
+# ============================
 # CONFIG
-# ==============================
+# ============================
 
-os.environ["OPENROUTER_API_KEY"] = "YOUR_API_KEY_HERE"
-API_KEY = os.environ.get("OPENROUTER_API_KEY")
+API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+if not API_KEY:
+    st.error("❌ OPENROUTER_API_KEY not found. Add it in GitHub/Streamlit secrets.")
+    st.stop()
 
 MODEL_NAME = "meta-llama/llama-3-70b-instruct"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM_PROMPT = """
 You are Veera's Governance AI Agent.
 You think in systems, explain clearly, and always propose next actions.
 """
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-
-# ==============================
+# ============================
 # LLM CALL
-# ==============================
+# ============================
 
 def call_agent(messages):
     payload = {
@@ -35,101 +37,59 @@ def call_agent(messages):
     }
 
     try:
-        res = requests.post(
+        r = requests.post(
             OPENROUTER_URL,
             headers=headers,
             json=payload,
             timeout=60
         )
 
-        data = res.json()
+        data = r.json()
 
         if "error" in data:
-            return {"role": "assistant", "content": f"❌ {data['error']['message']}"}
+            return f"❌ {data['error']['message']}"
 
-        return data["choices"][0]["message"]
+        return data["choices"][0]["message"]["content"]
 
     except Exception as e:
-        return {"role": "assistant", "content": f"⚠️ {str(e)}"}
+        return f"⚠️ {str(e)}"
 
 
-# ==============================
-# UI STYLE
-# ==============================
+# ============================
+# STREAMLIT UI
+# ============================
 
-CUSTOM_CSS = """
-.chatbot .message.user {
-    background: linear-gradient(135deg,#0ea5e9,#22c55e);
-    color:#0f172a;
-    border-radius:18px 18px 4px 18px;
-    padding:10px 14px;
-}
+st.set_page_config(page_title="Veera Governance AI", layout="centered")
 
-.chatbot .message.assistant {
-    background:#0f172a;
-    color:#e5e7eb;
-    border-radius:18px 18px 18px 4px;
-    border:1px solid #334155;
-    padding:10px 14px;
-}
+st.title("🧠 Veera's Governance AI Agent")
+st.caption("OpenRouter · Llama-3 70B · Systems Thinking AI")
 
-body {
-    background: radial-gradient(circle at top,#0b1220,#000);
-}
-"""
+if "chat" not in st.session_state:
+    st.session_state.chat = []
 
+# Show chat history
+for msg in st.session_state.chat:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-# ==============================
-# APP
-# ==============================
+# User input
+prompt = st.chat_input("Ask about governance, KPIs, defects, architecture...")
 
-with gr.Blocks(css=CUSTOM_CSS) as demo:
+if prompt:
+    # Add user message
+    st.session_state.chat.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    gr.Markdown("""
-    <div style="text-align:center;padding:16px">
-        <h2 style="color:#e5e7eb">Veera's Governance AI Agent</h2>
-        <p style="color:#9ca3af">Llama-3 70B · OpenRouter · Intelligent Systems</p>
-    </div>
-    """)
+    # Get AI reply
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            reply = call_agent(st.session_state.chat)
+            st.markdown(reply)
 
-    chatbot = gr.Chatbot(type="messages", height=500, elem_classes=["chatbot"])
+    st.session_state.chat.append({"role": "assistant", "content": reply})
 
-    with gr.Row():
-        user_input = gr.Textbox(
-            placeholder="Ask about governance, architecture, KPIs, defects...",
-            lines=3,
-            scale=8
-        )
-        send_btn = gr.Button("Send", scale=1)
-        clear_btn = gr.Button("Clear", scale=1)
-
-
-    def send_message(message, history):
-        history = history + [{"role": "user", "content": message}]
-        return "", history
-
-
-    def get_reply(history):
-        reply = call_agent(history)
-        history = history + [reply]
-        return history
-
-
-    send_btn.click(
-        send_message,
-        [user_input, chatbot],
-        [user_input, chatbot]
-    ).then(
-        get_reply,
-        chatbot,
-        chatbot
-    )
-
-    clear_btn.click(lambda: [], None, chatbot)
-
-
-# ==============================
-# RUN
-# ==============================
-
-demo.launch(share=True)
+# Clear button
+if st.button("🧹 Clear chat"):
+    st.session_state.chat = []
+    st.rerun()
