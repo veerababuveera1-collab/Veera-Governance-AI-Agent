@@ -3,5 +3,4 @@ requests
 faiss-cpu
 sentence-transformers
 pypdf
-speechrecognition
 numpy
