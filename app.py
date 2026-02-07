@@ -76,23 +76,39 @@ def search_memory(q, k=4):
     return "\n".join(doc_chunks[i] for i in ids[0])
 
 # ======================
-# LLM CALL
+# SAFE LLM CALL (FIXED)
 # ======================
 
-def call_ai(messages):
-    r = requests.post(
-        URL,
-        headers={
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={"model": MODEL, "messages": messages},
-        timeout=60
-    )
-    return r.json()["choices"][0]["message"]["content"]
+def call_ai(messages, retries=3):
+    for _ in range(retries):
+        try:
+            r = requests.post(
+                URL,
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={"model": MODEL, "messages": messages},
+                timeout=60
+            )
+
+            data = r.json()
+
+            if isinstance(data, dict) and "choices" in data:
+                return data["choices"][0]["message"]["content"]
+
+            if "error" in data:
+                return f"AI Error: {data['error'].get('message','Unknown error')}"
+
+            return "⚠️ AI returned empty response"
+
+        except Exception:
+            time.sleep(1)
+
+    return "❌ AI service unavailable after retries"
 
 # ======================
-# MULTI AGENT (PLANNING)
+# MULTI AGENT (THINKING)
 # ======================
 
 AGENTS = {
@@ -118,7 +134,7 @@ def agent_workflow(q, context):
     ])
 
 # ======================
-# CLOUD VOICE
+# CLOUD SAFE VOICE
 # ======================
 
 def speak(text):
@@ -173,7 +189,6 @@ tabs = st.tabs([
 # ---------- CHAT ----------
 
 with tabs[0]:
-
     if "chat" not in st.session_state:
         st.session_state.chat=[]
 
@@ -186,7 +201,6 @@ with tabs[0]:
     if q:
         mem = search_memory(q)
         ans = agent_workflow(q, mem)
-
         st.session_state.chat += [
             {"role":"user","content":q},
             {"role":"assistant","content":ans}
@@ -196,9 +210,7 @@ with tabs[0]:
 # ---------- DOCUMENT MEMORY ----------
 
 with tabs[1]:
-
     f = st.file_uploader("Upload PDF", type="pdf")
-
     if f:
         text = "".join(p.extract_text() for p in PdfReader(f).pages if p.extract_text())
         add_to_memory(text)
@@ -207,9 +219,7 @@ with tabs[1]:
 # ---------- VOICE ----------
 
 with tabs[2]:
-
     vq = st.text_input("Ask for voice reply")
-
     if vq:
         mem = search_memory(vq)
         ans = agent_workflow(vq, mem)
@@ -219,9 +229,7 @@ with tabs[2]:
 # ---------- AUTOMATION ----------
 
 with tabs[3]:
-
     task = st.text_area("Describe task for AI agents")
-
     if st.button("Run Automation"):
         mem = search_memory(task)
         res = agent_workflow(task, mem)
@@ -230,18 +238,14 @@ with tabs[3]:
 # ---------- CODE LAB ----------
 
 with tabs[4]:
-
     st.subheader("💻 Multi-Agent Code Engineering Lab")
-
     code_task = st.text_area(
         "Describe code you want",
-        placeholder="Create Streamlit UAV command center with real-time dashboard..."
+        placeholder="Create production-ready SaaS app with login, DB, admin panel..."
     )
-
     if st.button("🚀 Generate Production Code"):
         with st.spinner("AI engineering team working..."):
             code = run_code_agents(code_task)
-
         st.code(code, language="python")
 
 # ---------- LOGOUT ----------
