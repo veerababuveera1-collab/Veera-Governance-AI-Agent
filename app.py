@@ -8,7 +8,7 @@ import streamlit.components.v1 as components
 # AUTH
 # ======================
 
-USERS = {"admin":"1234","veera":"ai2026"}
+USERS = {"admin": "1234", "veera": "ai2026"}
 
 def login():
     st.subheader("🔐 Login")
@@ -38,6 +38,19 @@ URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "meta-llama/llama-3-70b-instruct"
 
 # ======================
+# SESSION STATE (CODE LAB)
+# ======================
+
+if "current_step" not in st.session_state:
+    st.session_state.current_step = 0
+
+if "generated_files" not in st.session_state:
+    st.session_state.generated_files = {}
+
+if "project_architecture" not in st.session_state:
+    st.session_state.project_architecture = None
+
+# ======================
 # EMBEDDINGS
 # ======================
 
@@ -57,10 +70,7 @@ doc_chunks = []
 
 def chunk_text(text, size=400, overlap=60):
     words = text.split()
-    out=[]
-    for i in range(0,len(words),size-overlap):
-        out.append(" ".join(words[i:i+size]))
-    return out
+    return [" ".join(words[i:i+size]) for i in range(0, len(words), size-overlap)]
 
 def add_to_memory(text):
     chunks = chunk_text(text)
@@ -76,10 +86,10 @@ def search_memory(q, k=4):
     return "\n".join(doc_chunks[i] for i in ids[0])
 
 # ======================
-# SAFE LLM CALL (FIXED)
+# SAFE LLM CALL (TOKEN SAFE)
 # ======================
 
-def call_ai(messages, retries=3):
+def call_ai(messages, max_tokens=800, retries=2):
     for _ in range(retries):
         try:
             r = requests.post(
@@ -88,50 +98,52 @@ def call_ai(messages, retries=3):
                     "Authorization": f"Bearer {API_KEY}",
                     "Content-Type": "application/json"
                 },
-                json={"model": MODEL, "messages": messages},
+                json={
+                    "model": MODEL,
+                    "messages": messages,
+                    "max_tokens": max_tokens
+                },
                 timeout=60
             )
 
             data = r.json()
 
-            if isinstance(data, dict) and "choices" in data:
+            if "choices" in data:
                 return data["choices"][0]["message"]["content"]
 
             if "error" in data:
-                return f"AI Error: {data['error'].get('message','Unknown error')}"
+                return f"⚠️ AI Error: {data['error'].get('message','Unknown')}"
 
-            return "⚠️ AI returned empty response"
+            return "⚠️ Empty response"
 
         except Exception:
             time.sleep(1)
 
-    return "❌ AI service unavailable after retries"
+    return "❌ AI service unavailable"
 
 # ======================
 # MULTI AGENT (THINKING)
 # ======================
 
 AGENTS = {
-    "planner":"Break into steps",
-    "researcher":"Provide technical insights",
-    "architect":"Design scalable system",
-    "qa":"Find risks and gaps"
+    "planner": "Break into steps",
+    "researcher": "Provide technical insights",
+    "architect": "Design scalable system",
+    "qa": "Find risks and gaps"
 }
 
 def agent_workflow(q, context):
-    outputs=[]
+    outputs = []
     for role in AGENTS.values():
         outputs.append(call_ai([
-            {"role":"system","content":role},
-            {"role":"user","content":context+"\n"+q}
-        ]))
-
-    merged="\n".join(outputs)
+            {"role": "system", "content": role},
+            {"role": "user", "content": context + "\n" + q}
+        ], max_tokens=400))
 
     return call_ai([
-        {"role":"system","content":"Create enterprise-grade final solution"},
-        {"role":"user","content":merged}
-    ])
+        {"role": "system", "content": "Create enterprise-grade final solution"},
+        {"role": "user", "content": "\n".join(outputs)}
+    ], max_tokens=700)
 
 # ======================
 # CLOUD SAFE VOICE
@@ -140,36 +152,28 @@ def agent_workflow(q, context):
 def speak(text):
     components.html(f"""
     <script>
-    const m = new SpeechSynthesisUtterance({repr(text)});
-    speechSynthesis.speak(m);
+    const msg = new SpeechSynthesisUtterance({repr(text)});
+    speechSynthesis.speak(msg);
     </script>
-    """,height=0)
+    """, height=0)
 
 # ======================
-# CODE AGENT TEAM
+# CODE LAB HELPERS
 # ======================
 
-CODE_AGENTS = {
-    "architect":"Design clean software structure",
-    "generator":"Write complete working Python/Streamlit code",
-    "bugfix":"Fix all bugs",
-    "optimizer":"Improve performance & cloud stability"
-}
+FILE_ORDER = [
+    "database.py",
+    "auth.py",
+    "booking_engine.py",
+    "seat_management.py",
+    "payment.py",
+    "admin.py",
+    "app.py"
+]
 
-def run_code_agents(task):
-    outputs=[]
-    for role in CODE_AGENTS.values():
-        outputs.append(call_ai([
-            {"role":"system","content":role},
-            {"role":"user","content":task}
-        ]))
-
-    merged="\n".join(outputs)
-
-    return call_ai([
-        {"role":"system","content":"Merge into production-ready code"},
-        {"role":"user","content":merged}
-    ])
+def next_file():
+    idx = st.session_state.current_step - 1
+    return FILE_ORDER[idx] if idx < len(FILE_ORDER) else None
 
 # ======================
 # UI
@@ -186,24 +190,23 @@ tabs = st.tabs([
     "💻 Code Lab"
 ])
 
-# ---------- CHAT ----------
+# ---------- AI CHAT ----------
 
 with tabs[0]:
     if "chat" not in st.session_state:
-        st.session_state.chat=[]
+        st.session_state.chat = []
 
     for m in st.session_state.chat:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
     q = st.chat_input("Ask anything...")
-
     if q:
         mem = search_memory(q)
         ans = agent_workflow(q, mem)
         st.session_state.chat += [
-            {"role":"user","content":q},
-            {"role":"assistant","content":ans}
+            {"role": "user", "content": q},
+            {"role": "assistant", "content": ans}
         ]
         st.rerun()
 
@@ -235,18 +238,76 @@ with tabs[3]:
         res = agent_workflow(task, mem)
         st.markdown(res)
 
-# ---------- CODE LAB ----------
+# ---------- TOKEN SAFE CODE LAB ----------
 
 with tabs[4]:
-    st.subheader("💻 Multi-Agent Code Engineering Lab")
-    code_task = st.text_area(
-        "Describe code you want",
-        placeholder="Create production-ready SaaS app with login, DB, admin panel..."
+    st.subheader("💻 Token-Safe Multi-Agent Code Lab")
+
+    project = st.text_area(
+        "Describe project once",
+        placeholder="Build production-ready bus booking system like RedBus"
     )
-    if st.button("🚀 Generate Production Code"):
-        with st.spinner("AI engineering team working..."):
-            code = run_code_agents(code_task)
-        st.code(code, language="python")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    with c1:
+        if st.button("🧱 Architecture"):
+            if st.session_state.current_step > 0:
+                st.info("Architecture already generated")
+            else:
+                arch = call_ai([
+                    {"role": "system", "content": "You are a senior software architect"},
+                    {"role": "user", "content": project + "\nCreate folder structure only"}
+                ], max_tokens=600)
+                st.session_state.project_architecture = arch
+                st.session_state.current_step = 1
+                st.code(arch)
+
+    with c2:
+        if st.button("📄 Next File"):
+            if st.session_state.current_step == 0:
+                st.warning("Generate architecture first")
+            else:
+                file = next_file()
+                if not file:
+                    st.info("All files generated")
+                elif file in st.session_state.generated_files:
+                    st.info(f"{file} already exists")
+                else:
+                    code = call_ai([
+                        {"role": "system", "content": "Write clean production-ready Python code"},
+                        {"role": "user", "content": f"Generate ONLY {file} for:\n{project}"}
+                    ], max_tokens=1200)
+                    st.session_state.generated_files[file] = code
+                    st.session_state.current_step += 1
+                    st.code(code, language="python")
+
+    with c3:
+        if st.button("🐞 Fix Bugs"):
+            combined = "\n".join(st.session_state.generated_files.values())
+            fix = call_ai([
+                {"role": "system", "content": "Fix bugs only"},
+                {"role": "user", "content": combined}
+            ], max_tokens=500)
+            st.code(fix)
+
+    with c4:
+        if st.button("⚡ Optimize"):
+            combined = "\n".join(st.session_state.generated_files.values())
+            opt = call_ai([
+                {"role": "system", "content": "Optimize performance and stability"},
+                {"role": "user", "content": combined}
+            ], max_tokens=400)
+            st.code(opt)
+
+    with c5:
+        if st.button("🔁 Review"):
+            combined = "\n".join(st.session_state.generated_files.values())
+            review = call_ai([
+                {"role": "system", "content": "Review for production readiness"},
+                {"role": "user", "content": combined}
+            ], max_tokens=500)
+            st.markdown(review)
 
 # ---------- LOGOUT ----------
 
