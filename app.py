@@ -1,258 +1,95 @@
 import streamlit as st
 import requests
 import os
-import time
-import faiss
-import numpy as np
-import json
-import hashlib
-from datetime import datetime
-from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 
-# =========================
+# ============================
 # CONFIG
-# =========================
+# ============================
 
-APP_NAME = "Veera Enterprise AI"
-MODEL = "meta-llama/llama-3-70b-instruct"
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 if not API_KEY:
-    st.error("Missing OPENROUTER_API_KEY")
+    st.error("❌ OPENROUTER_API_KEY not found. Add it in GitHub/Streamlit secrets.")
     st.stop()
 
-DATA_DIR = "data"
-MEMORY_INDEX = f"{DATA_DIR}/memory.index"
-MEMORY_CHUNKS = f"{DATA_DIR}/chunks.json"
-USERS_FILE = f"{DATA_DIR}/users.json"
-LOG_FILE = f"{DATA_DIR}/activity.log"
+MODEL_NAME = "meta-llama/llama-3-70b-instruct"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-os.makedirs(DATA_DIR, exist_ok=True)
+SYSTEM_PROMPT = """
+You are Veera's Governance AI Agent.
+You think in systems, explain clearly, and always propose next actions.
+"""
 
-# =========================
-# SECURITY
-# =========================
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+# ============================
+# LLM CALL
+# ============================
 
-def load_users():
-    if os.path.exists(USERS_FILE):
-        return json.load(open(USERS_FILE))
-    return {"admin": hash_password("admin123")}
+def call_agent(messages):
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+    }
 
-users = load_users()
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-def login():
-    st.subheader("🔐 Secure Login")
-    u = st.text_input("Username")
-    p = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if u in users and users[u] == hash_password(p):
-            st.session_state.user = u
-            st.rerun()
-        else:
-            st.error("Invalid credentials")
-
-if "user" not in st.session_state:
-    login()
-    st.stop()
-
-# =========================
-# LOGGING
-# =========================
-
-def log_activity(msg):
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{datetime.now()} | {msg}\n")
-
-# =========================
-# AI CORE
-# =========================
-
-def call_ai(messages, max_tokens=1000):
     try:
         r = requests.post(
-            API_URL,
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": MODEL,
-                "messages": messages,
-                "max_tokens": max_tokens
-            },
+            OPENROUTER_URL,
+            headers=headers,
+            json=payload,
             timeout=60
         )
+
         data = r.json()
-        if "choices" in data:
-            return data["choices"][0]["message"]["content"]
-    except:
-        pass
-    return "AI service unavailable"
 
-# =========================
-# AGENT CLASS
-# =========================
+        if "error" in data:
+            return f"❌ {data['error']['message']}"
 
-class Agent:
-    def __init__(self, name, system_prompt):
-        self.name = name
-        self.system_prompt = system_prompt
+        return data["choices"][0]["message"]["content"]
 
-    def run(self, task, context=""):
-        return call_ai([
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": context + "\n" + task}
-        ])
+    except Exception as e:
+        return f"⚠️ {str(e)}"
 
-# =========================
-# AGENT DEFINITIONS
-# =========================
 
-planner = Agent("Planner",
-    "Break the goal into clear step-by-step tasks.")
+# ============================
+# STREAMLIT UI
+# ============================
 
-researcher = Agent("Researcher",
-    "Retrieve relevant context and information.")
+st.set_page_config(page_title="Veera Governance AI", layout="centered")
 
-executor = Agent("Executor",
-    "Execute the task and produce results.")
+st.title("🧠 Veera's Governance AI Agent")
+st.caption("OpenRouter · Llama-3 70B · Systems Thinking AI")
 
-coder = Agent("Coder",
-    "Write clean, runnable code if needed.")
+if "chat" not in st.session_state:
+    st.session_state.chat = []
 
-critic = Agent("Critic",
-    "Review the output. Say OK if correct, or FIX with reason.")
+# Show chat history
+for msg in st.session_state.chat:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-supervisor = Agent("Supervisor",
-    "Decide whether to CONTINUE, FIX, or FINISH.")
+# User input
+prompt = st.chat_input("Ask about governance, KPIs, defects, architecture...")
 
-# =========================
-# MEMORY SYSTEM
-# =========================
+if prompt:
+    # Add user message
+    st.session_state.chat.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-@st.cache_resource
-def load_embedder():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+    # Get AI reply
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            reply = call_agent(st.session_state.chat)
+            st.markdown(reply)
 
-embedder = load_embedder()
-DIM = 384
+    st.session_state.chat.append({"role": "assistant", "content": reply})
 
-def load_memory():
-    if os.path.exists(MEMORY_INDEX):
-        index = faiss.read_index(MEMORY_INDEX)
-        chunks = json.load(open(MEMORY_CHUNKS))
-    else:
-        index = faiss.IndexFlatIP(DIM)
-        chunks = []
-    return index, chunks
-
-index, doc_chunks = load_memory()
-
-def search_memory(q, k=4):
-    if index.ntotal == 0:
-        return ""
-    qv = embedder.encode([q], normalize_embeddings=True).astype("float32")
-    _, ids = index.search(qv, k)
-    return "\n".join(doc_chunks[i] for i in ids[0] if i < len(doc_chunks))
-
-# =========================
-# AUTONOMOUS EXECUTION LOOP
-# =========================
-
-def autonomous_run(goal, max_steps=4):
-    log = []
-    context = ""
-
-    # Step 1: Planning
-    plan = planner.run(goal)
-    log.append(f"🧠 PLAN:\n{plan}")
-
-    steps = plan.split("\n")
-
-    for i, step in enumerate(steps[:max_steps]):
-        log.append(f"⚙️ STEP {i+1}: {step}")
-
-        memory = search_memory(step)
-        research = researcher.run(step, memory)
-
-        result = executor.run(step, research)
-        review = critic.run(result)
-
-        log.append(f"📊 RESULT:\n{result}")
-        log.append(f"🔍 REVIEW:\n{review}")
-
-        decision = supervisor.run(review)
-
-        log.append(f"🧭 DECISION: {decision}")
-
-        if "FINISH" in decision.upper():
-            break
-
-    return "\n\n".join(log)
-
-# =========================
-# UI
-# =========================
-
-st.set_page_config(APP_NAME, layout="wide")
-st.title("🚀 Veera Enterprise AI Platform")
-
-menu = st.sidebar.radio(
-    "Navigation",
-    ["Dashboard", "AI Chat", "Autonomous Mode", "Activity"]
-)
-
-# =========================
-# DASHBOARD
-# =========================
-
-if menu == "Dashboard":
-    st.metric("Memory Chunks", len(doc_chunks))
-    st.metric("User", st.session_state.user)
-
-# =========================
-# CHAT
-# =========================
-
-elif menu == "AI Chat":
-    q = st.text_input("Ask AI")
-    if q:
-        mem = search_memory(q)
-        ans = executor.run(q, mem)
-        st.write(ans)
-        log_activity("Chat used")
-
-# =========================
-# AUTONOMOUS MODE
-# =========================
-
-elif menu == "Autonomous Mode":
-    st.subheader("🤖 Autonomous AI Task Execution")
-
-    goal = st.text_area("Describe your goal")
-
-    if st.button("Run Autonomous AI") and goal:
-        output = autonomous_run(goal)
-        st.text_area("Execution Log", output, height=500)
-        log_activity("Autonomous run executed")
-
-# =========================
-# ACTIVITY
-# =========================
-
-elif menu == "Activity":
-    if os.path.exists(LOG_FILE):
-        st.text(open(LOG_FILE).read())
-
-# =========================
-# LOGOUT
-# =========================
-
-if st.sidebar.button("Logout"):
-    st.session_state.clear()
+# Clear button
+if st.button("🧹 Clear chat"):
+    st.session_state.chat = []
     st.rerun()
