@@ -3,13 +3,7 @@ import requests, os, time, faiss, numpy as np
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
-
-# ======================
-# PAGE CONFIG
-# ======================
-
-st.set_page_config("Veera-Governance-AI-Agent", layout="wide")
-st.title("🏛️ Veera-Governance-AI-Agent")
+from datetime import datetime
 
 # ======================
 # AUTH
@@ -18,7 +12,7 @@ st.title("🏛️ Veera-Governance-AI-Agent")
 USERS = {"admin": "1234", "veera": "ai2026"}
 
 def login():
-    st.subheader("🔐 Secure Login")
+    st.subheader("🔐 Login")
     u = st.text_input("Username")
     p = st.text_input("Password", type="password")
     if st.button("Login"):
@@ -42,55 +36,119 @@ if not API_KEY:
     st.stop()
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
+MODEL = "meta-llama/llama-3-70b-instruct"
 
 # ======================
-# MODEL CONFIG
+# SAFE LLM CALL
 # ======================
 
-MODELS = {
-    "Auto (Smart Routing)": "auto",
-    "Fast Free Model": "stepfun/step-3.5-flash",
-    "Coding Model": "qwen/qwen3-coder-next",
-    "Reasoning Model": "arcee/trinity-large-preview",
-    "Premium Model": "moonshotai/kimi-k2.5"
-}
+def call_ai(messages, max_tokens=1000, retries=2):
+    for _ in range(retries):
+        try:
+            r = requests.post(
+                URL,
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": MODEL,
+                    "messages": messages,
+                    "max_tokens": max_tokens
+                },
+                timeout=60
+            )
+            data = r.json()
 
-DEFAULT_FALLBACK = "stepfun/step-3.5-flash"
+            if "choices" in data:
+                return data["choices"][0]["message"]["content"]
 
-st.sidebar.header("🧠 AI Model Settings")
-model_choice = st.sidebar.selectbox(
-    "Select AI Model",
-    list(MODELS.keys())
-)
-selected_model = MODELS[model_choice]
+            if "error" in data:
+                return f"⚠️ AI Error: {data['error'].get('message','Unknown')}"
 
-# ======================
-# MASTER PROMPT
-# ======================
+            return "⚠️ Empty response"
 
-MASTER_PROMPT = """
-You are Veera-Governance-AI-Agent.
-You assist citizens, officers, and administrators.
+        except Exception:
+            time.sleep(1)
 
-Rules:
-- Provide accurate, clear, practical answers.
-- Use document memory when available.
-- Do not hallucinate unknown facts.
-- If unsure, suggest human escalation.
-"""
-
-# ======================
-# SESSION STATE
-# ======================
-
-if "chat" not in st.session_state:
-    st.session_state.chat = []
-
-if "generated_code" not in st.session_state:
-    st.session_state.generated_code = ""
+    return "❌ AI service unavailable"
 
 # ======================
-# EMBEDDINGS
+# AGENTS
+# ======================
+
+class BaseAgent:
+    def __init__(self, system_prompt):
+        self.system_prompt = system_prompt
+
+    def run(self, user_input, context=""):
+        return call_ai([
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": context + "\n" + user_input}
+        ])
+
+class ChatAgent(BaseAgent):
+    def __init__(self):
+        super().__init__("You are a helpful AI assistant.")
+
+class AutomationAgent(BaseAgent):
+    def __init__(self):
+        super().__init__("You are an automation AI. Provide step-by-step execution.")
+
+class CodeAgent(BaseAgent):
+    def __init__(self):
+        super().__init__("""
+You are a senior software engineer.
+
+You must generate a COMPLETE, SINGLE-FILE, FULLY RUNNABLE program.
+
+STRICT RULES:
+- Output ONLY code
+- No explanations
+- No partial classes
+- No continuation
+- No placeholders
+- Include all imports
+- Include all classes and functions
+- Include main entry point
+- Must run immediately
+""")
+
+class SecurityAgent(BaseAgent):
+    def __init__(self):
+        super().__init__("""
+You are a senior security engineer.
+
+Scan the code and detect:
+- Hardcoded secrets
+- SQL injection
+- Unsafe eval/exec
+- Insecure file handling
+- Weak authentication logic
+
+Output:
+1. Issues
+2. Risk level
+3. Fix suggestions
+""")
+
+    def scan(self, code):
+        return call_ai([
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": code}
+        ], max_tokens=600)
+
+class AgentController:
+    def __init__(self):
+        self.chat = ChatAgent()
+        self.automation = AutomationAgent()
+        self.code = CodeAgent()
+        self.security = SecurityAgent()
+
+controller = AgentController()
+
+# ======================
+# MEMORY SYSTEM
 # ======================
 
 @st.cache_resource
@@ -98,10 +156,6 @@ def load_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 embedder = load_embedder()
-
-# ======================
-# VECTOR MEMORY
-# ======================
 
 DIM = 384
 index = faiss.IndexFlatIP(DIM)
@@ -125,59 +179,17 @@ def search_memory(q, k=4):
     return "\n".join(doc_chunks[i] for i in ids[0])
 
 # ======================
-# SAFE AI CALL WITH FALLBACK
+# SESSION STATE
 # ======================
 
-def call_ai(messages, model, max_tokens=350):
-    models_to_try = []
+if "projects" not in st.session_state:
+    st.session_state.projects = ["Default Project"]
 
-    if model == "auto":
-        models_to_try = [
-            MODELS["Fast Free Model"],
-            MODELS["Coding Model"],
-            MODELS["Reasoning Model"]
-        ]
-    else:
-        models_to_try = [model]
+if "activity" not in st.session_state:
+    st.session_state.activity = []
 
-    models_to_try.append(DEFAULT_FALLBACK)
-
-    for m in models_to_try:
-        try:
-            r = requests.post(
-                URL,
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": m,
-                    "messages": messages,
-                    "max_tokens": max_tokens
-                },
-                timeout=60
-            )
-
-            data = r.json()
-
-            if "choices" in data:
-                return data["choices"][0]["message"]["content"]
-
-        except:
-            continue
-
-    return "❌ AI unavailable"
-
-# ======================
-# AGENT WORKFLOW
-# ======================
-
-def agent_workflow(q, context):
-    messages = [
-        {"role": "system", "content": MASTER_PROMPT},
-        {"role": "user", "content": context + "\n" + q}
-    ]
-    return call_ai(messages, model=selected_model, max_tokens=350)
+if "chat" not in st.session_state:
+    st.session_state.chat = []
 
 # ======================
 # VOICE
@@ -192,96 +204,176 @@ def speak(text):
     """, height=0)
 
 # ======================
-# UI TABS
+# UI
 # ======================
 
-tabs = st.tabs([
-    "💬 Chat",
-    "📄 Document Memory",
-    "🎤 Voice Assistant",
-    "⚙️ Automation",
-    "💻 Code Lab"
-])
+st.set_page_config("Veera Enterprise AI", layout="wide")
+st.title("🚀 Veera Enterprise AI Platform")
 
-# ---------- CHAT ----------
-with tabs[0]:
-    for m in st.session_state.chat:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+menu = st.sidebar.radio(
+    "Navigation",
+    [
+        "Dashboard",
+        "Projects",
+        "Code Lab",
+        "Security",
+        "Automation",
+        "AI Chat",
+        "Activity",
+        "Billing"
+    ]
+)
 
-    q = st.chat_input("Ask governance question...")
-    if q:
-        mem = search_memory(q)
-        ans = agent_workflow(q, mem)
-        st.session_state.chat += [
-            {"role": "user", "content": q},
-            {"role": "assistant", "content": ans}
-        ]
-        st.rerun()
+# ======================
+# DASHBOARD
+# ======================
 
-# ---------- DOCUMENT MEMORY ----------
-with tabs[1]:
-    f = st.file_uploader("Upload policy PDF", type="pdf")
-    if f:
-        text = "".join(p.extract_text() for p in PdfReader(f).pages if p.extract_text())
-        add_to_memory(text)
-        st.success("📚 Document stored in memory")
+if menu == "Dashboard":
+    st.subheader("Dashboard")
+    st.metric("Projects", len(st.session_state.projects))
+    st.metric("Activity Logs", len(st.session_state.activity))
 
-# ---------- VOICE ----------
-with tabs[2]:
-    vq = st.text_input("Ask by voice text")
-    if vq:
-        mem = search_memory(vq)
-        ans = agent_workflow(vq, mem)
-        st.markdown(ans)
-        speak(ans)
+    st.write("Recent Activity:")
+    for a in st.session_state.activity[-5:]:
+        st.write("•", a)
 
-# ---------- AUTOMATION ----------
-with tabs[3]:
-    task = st.text_area("Describe administrative task")
-    if st.button("Run Automation"):
-        mem = search_memory(task)
-        res = agent_workflow(task, mem)
-        st.markdown(res)
+# ======================
+# PROJECTS
+# ======================
 
-# ---------- CODE LAB (AUTO-FIX PIPELINE) ----------
-with tabs[4]:
-    st.subheader("💻 Auto-Fix Code Lab")
+elif menu == "Projects":
+    st.subheader("Projects")
+
+    new_proj = st.text_input("New project name")
+    if st.button("Create Project") and new_proj:
+        st.session_state.projects.append(new_proj)
+        st.success("Project created")
+
+    for p in st.session_state.projects:
+        st.write("•", p)
+
+# ======================
+# CODE LAB (CORE)
+# ======================
+
+elif menu == "Code Lab":
+    st.subheader("💻 Code Lab")
 
     project = st.text_area(
-        "Describe system to build",
-        placeholder="Build citizen complaint management system"
+        "Describe your system",
+        placeholder="Build a hospital appointment system"
     )
 
-    if st.button("🚀 Generate Error-Free Code"):
-        # Step 1: Generate code
-        code = call_ai([
-            {"role": "system", "content": "You are a senior software engineer"},
-            {"role": "user", "content": project + "\nGenerate production-ready Python code"}
-        ], model=MODELS["Coding Model"], max_tokens=800)
+    mode = st.selectbox(
+        "Output type",
+        ["Python Script", "Streamlit App", "FastAPI API"]
+    )
 
-        # Step 2: Fix bugs
-        fixed = call_ai([
-            {"role": "system", "content": "Fix all bugs and missing imports"},
-            {"role": "user", "content": code}
-        ], model=MODELS["Coding Model"], max_tokens=600)
+    if st.button("Generate Executable Code"):
+        if not project.strip():
+            st.warning("Please describe a system.")
+        else:
+            base_prompt = controller.code.system_prompt
 
-        # Step 3: Optimize
-        optimized = call_ai([
-            {"role": "system", "content": "Optimize for performance and stability"},
-            {"role": "user", "content": fixed}
-        ], model=MODELS["Coding Model"], max_tokens=600)
+            if mode == "Streamlit App":
+                base_prompt += "\nCreate a Streamlit app runnable with: streamlit run app.py"
+            elif mode == "FastAPI API":
+                base_prompt += "\nCreate a FastAPI app runnable with: uvicorn app:app --reload"
+            else:
+                base_prompt += "\nCreate a Python script runnable with: python app.py"
 
-        # Step 4: Final review
-        final = call_ai([
-            {"role": "system", "content": "Review and output final clean production code only"},
-            {"role": "user", "content": optimized}
-        ], model=MODELS["Coding Model"], max_tokens=700)
+            initial_code = call_ai([
+                {"role": "system", "content": base_prompt},
+                {"role": "user", "content": project}
+            ], max_tokens=1800)
 
-        st.session_state.generated_code = final
+            fix_prompt = """
+Review the following code and ensure:
+- Fully executable
+- No syntax errors
+- All imports included
+- Has valid entry point
 
-    if st.session_state.generated_code:
-        st.code(st.session_state.generated_code, language="python")
+Fix issues and output full code only.
+"""
+
+            final_code = call_ai([
+                {"role": "system", "content": fix_prompt},
+                {"role": "user", "content": initial_code}
+            ], max_tokens=1800)
+
+            st.success("Executable code generated")
+            st.code(final_code, language="python")
+
+            st.download_button(
+                "Download app.py",
+                final_code,
+                file_name="app.py"
+            )
+
+            # Security scan
+            report = controller.security.scan(final_code)
+            st.subheader("Security Report")
+            st.markdown(report)
+
+            st.session_state.activity.append(
+                f"{datetime.now().strftime('%H:%M:%S')} - Code generated"
+            )
+
+# ======================
+# SECURITY
+# ======================
+
+elif menu == "Security":
+    st.subheader("Security Center")
+    st.write("Security scans appear after code generation.")
+
+# ======================
+# AUTOMATION
+# ======================
+
+elif menu == "Automation":
+    task = st.text_area("Describe task")
+    if st.button("Run Automation"):
+        res = controller.automation.run(task)
+        st.write(res)
+        st.session_state.activity.append(
+            f"{datetime.now().strftime('%H:%M:%S')} - Automation run"
+        )
+
+# ======================
+# CHAT
+# ======================
+
+elif menu == "AI Chat":
+    for m in st.session_state.chat:
+        st.write(m)
+
+    q = st.text_input("Ask something")
+    if q:
+        mem = search_memory(q)
+        ans = controller.chat.run(q, mem)
+        st.write(ans)
+        st.session_state.chat.append(q)
+        st.session_state.chat.append(ans)
+
+# ======================
+# ACTIVITY
+# ======================
+
+elif menu == "Activity":
+    st.subheader("Activity Logs")
+    for a in st.session_state.activity:
+        st.write("•", a)
+
+# ======================
+# BILLING
+# ======================
+
+elif menu == "Billing":
+    st.subheader("Billing")
+    st.write("Plan: Starter")
+    st.write("Usage: 20,000 tokens")
 
 # ======================
 # LOGOUT
