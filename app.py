@@ -3,13 +3,7 @@ import requests, os, time, faiss, numpy as np
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
-
-# ======================
-# PAGE CONFIG
-# ======================
-
-st.set_page_config("Veera-Governance-AI-Agent", layout="wide")
-st.title("🏛️ Veera-Governance-AI-Agent")
+from datetime import datetime
 
 # ======================
 # AUTH
@@ -18,7 +12,7 @@ st.title("🏛️ Veera-Governance-AI-Agent")
 USERS = {"admin": "1234", "veera": "ai2026"}
 
 def login():
-    st.subheader("🔐 Secure Login")
+    st.subheader("🔐 Login")
     u = st.text_input("Username")
     p = st.text_input("Password", type="password")
     if st.button("Login"):
@@ -42,41 +36,139 @@ if not API_KEY:
     st.stop()
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
+MODEL = "meta-llama/llama-3-70b-instruct"
 
 # ======================
-# MULTI-MODEL CONFIG
+# SAFE LLM CALL
 # ======================
 
-MODELS = {
-    "fast": "stepfun/step-3.5-flash",        # free
-    "main": "moonshotai/kimi-k2.5",          # paid
-    "coding": "qwen/qwen3-coder-next",       # low cost
-    "reasoning": "anthropic/claude-opus-4.6",# paid
-    "fallback": "arcee/trinity-large-preview" # free
-}
+def call_ai(messages, max_tokens=800, retries=2):
+    for _ in range(retries):
+        try:
+            r = requests.post(
+                URL,
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": MODEL,
+                    "messages": messages,
+                    "max_tokens": max_tokens
+                },
+                timeout=60
+            )
 
-MASTER_PROMPT = """
-You are Veera-Governance-AI-Agent,
-an intelligent AI system for governance, administration, and citizen services.
+            data = r.json()
 
-Core responsibilities:
-1. Assist citizens and officials.
-2. Provide accurate, policy-based responses.
-3. Use document memory when available.
-4. Be professional, clear, and secure.
-5. Do not hallucinate unknown facts.
-6. If unsure, escalate to human support.
+            if "choices" in data:
+                return data["choices"][0]["message"]["content"]
+
+            if "error" in data:
+                return f"⚠️ AI Error: {data['error'].get('message','Unknown')}"
+
+            return "⚠️ Empty response"
+
+        except Exception:
+            time.sleep(1)
+
+    return "❌ AI service unavailable"
+
+# ======================
+# AGENT CLASSES
+# ======================
+
+class BaseAgent:
+    def __init__(self, name, system_prompt):
+        self.name = name
+        self.system_prompt = system_prompt
+
+    def run(self, user_input, context=""):
+        return call_ai([
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": context + "\n" + user_input}
+        ])
+
+class ChatAgent(BaseAgent):
+    def __init__(self):
+        super().__init__("ChatAgent", "You are a helpful AI assistant.")
+
+class AutomationAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            "AutomationAgent",
+            "You are an automation AI. Provide step-by-step execution."
+        )
+
+class CodeAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            "CodeAgent",
+            """You are a senior software engineer.
+
+Generate a COMPLETE, SINGLE-FILE, RUNNABLE program.
+
+Rules:
+- Output only code
+- No explanations
+- No pseudo-code
+- Include all imports
+- Include main entry point
+- Use stable libraries only
 """
+        )
+
+class SecurityAgent(BaseAgent):
+    def __init__(self):
+        super().__init__(
+            "SecurityAgent",
+            """You are a senior security engineer.
+
+Scan the code and detect:
+- Hardcoded secrets
+- SQL injection
+- Unsafe eval/exec
+- Insecure file handling
+- Weak auth logic
+
+Output:
+1. Issues
+2. Risk level
+3. Fix suggestions
+"""
+        )
+
+    def scan(self, code):
+        return call_ai([
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": code}
+        ], max_tokens=600)
 
 # ======================
-# SESSION STATE
+# AGENT CONTROLLER
 # ======================
 
-if "chat" not in st.session_state:
-    st.session_state.chat = []
+class AgentController:
+    def __init__(self):
+        self.chat = ChatAgent()
+        self.automation = AutomationAgent()
+        self.code = CodeAgent()
+        self.security = SecurityAgent()
+
+    def route(self, text, context=""):
+        t = text.lower()
+
+        if "build" in t or "code" in t:
+            return self.code.run(text, context)
+        elif "automation" in t or "task" in t:
+            return self.automation.run(text, context)
+        else:
+            return self.chat.run(text, context)
+
+controller = AgentController()
 
 # ======================
-# EMBEDDINGS
+# MEMORY SYSTEM
 # ======================
 
 @st.cache_resource
@@ -84,10 +176,6 @@ def load_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 embedder = load_embedder()
-
-# ======================
-# VECTOR MEMORY
-# ======================
 
 DIM = 384
 index = faiss.IndexFlatIP(DIM)
@@ -111,105 +199,17 @@ def search_memory(q, k=4):
     return "\n".join(doc_chunks[i] for i in ids[0])
 
 # ======================
-# INTENT + MODEL ROUTER
+# SESSION STATE
 # ======================
 
-def detect_intent(text):
-    t = text.lower()
+if "projects" not in st.session_state:
+    st.session_state.projects = ["Default Project"]
 
-    if any(x in t for x in ["error", "bug", "api", "code", "crash"]):
-        return "technical"
-    if any(x in t for x in ["plan", "price", "cost", "difference"]):
-        return "sales"
-    if any(x in t for x in ["refund", "charged", "billing"]):
-        return "billing"
-    if any(x in t for x in ["delete", "remove account"]):
-        return "deletion"
+if "activity" not in st.session_state:
+    st.session_state.activity = []
 
-    return "general"
-
-def route_model(intent):
-    if intent == "technical":
-        return MODELS["coding"]
-    elif intent == "billing":
-        return MODELS["fast"]
-    elif intent == "sales":
-        return MODELS["main"]
-    elif intent == "general":
-        return MODELS["main"]
-    else:
-        return MODELS["fallback"]
-
-# ======================
-# SAFE LLM CALL WITH FALLBACK
-# ======================
-
-def call_ai(messages, model, max_tokens=450, retries=2):
-
-    def send_request(model_name):
-        r = requests.post(
-            URL,
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://veeratech.ai",
-                "X-Title": "Veera Governance AI"
-            },
-            json={
-                "model": model_name,
-                "messages": messages,
-                "max_tokens": max_tokens
-            },
-            timeout=60
-        )
-        return r.json()
-
-    # Try primary model
-    for _ in range(retries):
-        try:
-            data = send_request(model)
-
-            if "choices" in data:
-                return data["choices"][0]["message"]["content"]
-
-            if "error" in data:
-                err = data["error"].get("message", "").lower()
-
-                if any(x in err for x in [
-                    "credit", "token", "insufficient", "payment", "afford"
-                ]):
-                    break
-
-                return f"⚠️ AI Error: {data['error'].get('message','Unknown')}"
-
-        except Exception:
-            time.sleep(1)
-
-    # Fallback to free model
-    try:
-        data = send_request(MODELS["fallback"])
-        if "choices" in data:
-            return "⚠️ Switched to free model:\n\n" + \
-                   data["choices"][0]["message"]["content"]
-    except:
-        pass
-
-    return "❌ AI service unavailable"
-
-# ======================
-# AGENT WORKFLOW
-# ======================
-
-def agent_workflow(q, context):
-    intent = detect_intent(q)
-    model = route_model(intent)
-
-    messages = [
-        {"role": "system", "content": MASTER_PROMPT},
-        {"role": "user", "content": context + "\n" + q}
-    ]
-
-    return call_ai(messages, model=model, max_tokens=450)
+if "chat" not in st.session_state:
+    st.session_state.chat = []
 
 # ======================
 # VOICE
@@ -224,60 +224,161 @@ def speak(text):
     """, height=0)
 
 # ======================
-# UI TABS
+# UI
 # ======================
 
-tabs = st.tabs([
-    "💬 Citizen & Officer Chat",
-    "📄 Policy Document Memory",
-    "🎤 Voice Assistant",
-    "⚙️ Automation Agent"
-])
+st.set_page_config("Veera Enterprise AI", layout="wide")
+st.title("🚀 Veera Enterprise AI Platform")
 
-# ---------- CHAT ----------
+menu = st.sidebar.radio(
+    "Navigation",
+    [
+        "Dashboard",
+        "Projects",
+        "Code Lab",
+        "Security",
+        "Automation",
+        "AI Chat",
+        "Activity",
+        "Billing"
+    ]
+)
 
-with tabs[0]:
+# ======================
+# DASHBOARD
+# ======================
+
+if menu == "Dashboard":
+    st.subheader("Dashboard")
+
+    st.metric("Projects", len(st.session_state.projects))
+    st.metric("Activity Logs", len(st.session_state.activity))
+
+    st.write("Recent Activity:")
+    for a in st.session_state.activity[-5:]:
+        st.write("•", a)
+
+# ======================
+# PROJECTS
+# ======================
+
+elif menu == "Projects":
+    st.subheader("Projects")
+
+    new_proj = st.text_input("New project name")
+    if st.button("Create Project") and new_proj:
+        st.session_state.projects.append(new_proj)
+        st.success("Project created")
+
+    for p in st.session_state.projects:
+        st.write("•", p)
+
+# ======================
+# CODE LAB (CORE ENGINE)
+# ======================
+
+elif menu == "Code Lab":
+    st.subheader("💻 Code Lab")
+
+    project = st.text_area(
+        "Describe your project",
+        placeholder="Build a Streamlit todo app"
+    )
+
+    mode = st.selectbox(
+        "Output type",
+        ["Python Script", "Streamlit App", "FastAPI API"]
+    )
+
+    if st.button("Generate Code"):
+        base_prompt = """
+Generate a COMPLETE, SINGLE-FILE, RUNNABLE program.
+Output only code.
+"""
+
+        initial_code = call_ai([
+            {"role": "system", "content": base_prompt},
+            {"role": "user", "content": project}
+        ], max_tokens=1500)
+
+        fix_prompt = "Fix errors and output final executable code only."
+
+        final_code = call_ai([
+            {"role": "system", "content": fix_prompt},
+            {"role": "user", "content": initial_code}
+        ], max_tokens=1500)
+
+        st.code(final_code, language="python")
+
+        st.download_button(
+            "Download app.py",
+            final_code,
+            file_name="app.py"
+        )
+
+        # Security scan
+        report = controller.security.scan(final_code)
+        st.subheader("Security Report")
+        st.markdown(report)
+
+        st.session_state.activity.append(
+            f"{datetime.now().strftime('%H:%M:%S')} - Code generated"
+        )
+
+# ======================
+# SECURITY
+# ======================
+
+elif menu == "Security":
+    st.subheader("Security Center")
+    st.write("Run code scans inside Code Lab.")
+
+# ======================
+# AUTOMATION
+# ======================
+
+elif menu == "Automation":
+    task = st.text_area("Describe task")
+    if st.button("Run Automation"):
+        res = controller.automation.run(task)
+        st.write(res)
+        st.session_state.activity.append(
+            f"{datetime.now().strftime('%H:%M:%S')} - Automation run"
+        )
+
+# ======================
+# CHAT
+# ======================
+
+elif menu == "AI Chat":
     for m in st.session_state.chat:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+        st.write(m)
 
-    q = st.chat_input("Ask governance question...")
+    q = st.text_input("Ask something")
     if q:
         mem = search_memory(q)
-        ans = agent_workflow(q, mem)
-        st.session_state.chat += [
-            {"role": "user", "content": q},
-            {"role": "assistant", "content": ans}
-        ]
-        st.rerun()
+        ans = controller.chat.run(q, mem)
+        st.write(ans)
+        st.session_state.chat.append(q)
+        st.session_state.chat.append(ans)
 
-# ---------- DOCUMENT MEMORY ----------
+# ======================
+# ACTIVITY
+# ======================
 
-with tabs[1]:
-    f = st.file_uploader("Upload policy PDF", type="pdf")
-    if f:
-        text = "".join(p.extract_text() for p in PdfReader(f).pages if p.extract_text())
-        add_to_memory(text)
-        st.success("📚 Document stored in governance memory")
+elif menu == "Activity":
+    st.subheader("Activity Logs")
+    for a in st.session_state.activity:
+        st.write("•", a)
 
-# ---------- VOICE ----------
+# ======================
+# BILLING
+# ======================
 
-with tabs[2]:
-    vq = st.text_input("Ask by voice text")
-    if vq:
-        mem = search_memory(vq)
-        ans = agent_workflow(vq, mem)
-        st.markdown(ans)
-        speak(ans)
-
-# ---------- AUTOMATION ----------
-
-with tabs[3]:
-    task = st.text_area("Describe administrative task")
-    if st.button("Run Automation"):
-        mem = search_memory(task)
-        res = agent_workflow(task, mem)
-        st.markdown(res)
+elif menu == "Billing":
+    st.subheader("Billing")
+    st.write("Plan: Starter")
+    st.write("Usage: 20,000 tokens")
 
 # ======================
 # LOGOUT
