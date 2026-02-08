@@ -44,25 +44,39 @@ if not API_KEY:
 URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # ======================
-# MODELS
+# MODEL CONFIG
 # ======================
 
 MODELS = {
-    "fast": "stepfun/step-3.5-flash",        # free
-    "main": "moonshotai/kimi-k2.5",          # powerful
-    "coding": "qwen/qwen3-coder-next",       # best coding
-    "reasoning": "anthropic/claude-opus-4.6",# deep reasoning
-    "fallback": "arcee/trinity-large-preview" # free fallback
+    "Auto (Smart Routing)": "auto",
+    "Fast Free Model": "stepfun/step-3.5-flash",
+    "Coding Model": "qwen/qwen3-coder-next",
+    "Reasoning Model": "arcee/trinity-large-preview",
+    "Premium Model": "moonshotai/kimi-k2.5"
 }
+
+DEFAULT_FALLBACK = "stepfun/step-3.5-flash"
+
+st.sidebar.header("🧠 AI Model Settings")
+model_choice = st.sidebar.selectbox(
+    "Select AI Model",
+    list(MODELS.keys())
+)
+selected_model = MODELS[model_choice]
+
+# ======================
+# MASTER PROMPT
+# ======================
 
 MASTER_PROMPT = """
 You are Veera-Governance-AI-Agent.
+You assist citizens, officers, and administrators.
 
-Follow these rules:
-1. Write production-ready, clean, secure code.
-2. Fix errors automatically.
-3. Optimize performance.
-4. Ensure the code runs without crashes.
+Rules:
+- Provide accurate, clear, practical answers.
+- Use document memory when available.
+- Do not hallucinate unknown facts.
+- If unsure, suggest human escalation.
 """
 
 # ======================
@@ -71,6 +85,9 @@ Follow these rules:
 
 if "chat" not in st.session_state:
     st.session_state.chat = []
+
+if "generated_code" not in st.session_state:
+    st.session_state.generated_code = ""
 
 # ======================
 # EMBEDDINGS
@@ -108,122 +125,59 @@ def search_memory(q, k=4):
     return "\n".join(doc_chunks[i] for i in ids[0])
 
 # ======================
-# INTENT ROUTER
-# ======================
-
-def detect_intent(text):
-    t = text.lower()
-    if any(x in t for x in ["error", "bug", "code", "api"]):
-        return "technical"
-    if any(x in t for x in ["price", "plan"]):
-        return "sales"
-    return "general"
-
-def route_model(intent):
-    if intent == "technical":
-        return MODELS["coding"]
-    return MODELS["main"]
-
-# ======================
 # SAFE AI CALL WITH FALLBACK
 # ======================
 
-def call_ai(messages, model, max_tokens=450, retries=2):
+def call_ai(messages, model, max_tokens=350):
+    models_to_try = []
 
-    def send(model_name):
-        r = requests.post(
-            URL,
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://veeratech.ai",
-                "X-Title": "Veera Governance AI"
-            },
-            json={
-                "model": model_name,
-                "messages": messages,
-                "max_tokens": max_tokens
-            },
-            timeout=60
-        )
-        return r.json()
+    if model == "auto":
+        models_to_try = [
+            MODELS["Fast Free Model"],
+            MODELS["Coding Model"],
+            MODELS["Reasoning Model"]
+        ]
+    else:
+        models_to_try = [model]
 
-    for _ in range(retries):
+    models_to_try.append(DEFAULT_FALLBACK)
+
+    for m in models_to_try:
         try:
-            data = send(model)
+            r = requests.post(
+                URL,
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": m,
+                    "messages": messages,
+                    "max_tokens": max_tokens
+                },
+                timeout=60
+            )
+
+            data = r.json()
+
             if "choices" in data:
                 return data["choices"][0]["message"]["content"]
 
-            if "error" in data:
-                err = data["error"].get("message", "").lower()
-                if any(x in err for x in ["credit", "token", "insufficient"]):
-                    break
-                return f"⚠️ {data['error'].get('message')}"
-
         except:
-            time.sleep(1)
-
-    # fallback
-    try:
-        data = send(MODELS["fallback"])
-        if "choices" in data:
-            return "⚠️ Free model used:\n\n" + data["choices"][0]["message"]["content"]
-    except:
-        pass
+            continue
 
     return "❌ AI unavailable"
 
 # ======================
-# CHAT AGENT
+# AGENT WORKFLOW
 # ======================
 
 def agent_workflow(q, context):
-    intent = detect_intent(q)
-    model = route_model(intent)
-
     messages = [
         {"role": "system", "content": MASTER_PROMPT},
         {"role": "user", "content": context + "\n" + q}
     ]
-    return call_ai(messages, model)
-
-# ======================
-# CODE AUTO-FIX PIPELINE
-# ======================
-
-def code_pipeline(project_desc):
-
-    # 1. Architecture
-    arch = call_ai([
-        {"role": "system", "content": "You are a senior architect"},
-        {"role": "user", "content": project_desc + "\nCreate system architecture"}
-    ], MODELS["reasoning"])
-
-    # 2. Code generation
-    code = call_ai([
-        {"role": "system", "content": "Write production-ready code"},
-        {"role": "user", "content": project_desc}
-    ], MODELS["coding"])
-
-    # 3. Fix bugs
-    fixed = call_ai([
-        {"role": "system", "content": "Fix all bugs and missing imports"},
-        {"role": "user", "content": code}
-    ], MODELS["coding"])
-
-    # 4. Optimize
-    optimized = call_ai([
-        {"role": "system", "content": "Optimize performance and stability"},
-        {"role": "user", "content": fixed}
-    ], MODELS["coding"])
-
-    # 5. Review
-    reviewed = call_ai([
-        {"role": "system", "content": "Review and return final production-ready code"},
-        {"role": "user", "content": optimized}
-    ], MODELS["reasoning"])
-
-    return arch, reviewed
+    return call_ai(messages, model=selected_model, max_tokens=350)
 
 # ======================
 # VOICE
@@ -242,21 +196,20 @@ def speak(text):
 # ======================
 
 tabs = st.tabs([
-    "💬 AI Chat",
+    "💬 Chat",
     "📄 Document Memory",
-    "🎤 Voice",
+    "🎤 Voice Assistant",
     "⚙️ Automation",
     "💻 Code Lab"
 ])
 
 # ---------- CHAT ----------
-
 with tabs[0]:
     for m in st.session_state.chat:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    q = st.chat_input("Ask something...")
+    q = st.chat_input("Ask governance question...")
     if q:
         mem = search_memory(q)
         ans = agent_workflow(q, mem)
@@ -267,18 +220,16 @@ with tabs[0]:
         st.rerun()
 
 # ---------- DOCUMENT MEMORY ----------
-
 with tabs[1]:
-    f = st.file_uploader("Upload PDF", type="pdf")
+    f = st.file_uploader("Upload policy PDF", type="pdf")
     if f:
         text = "".join(p.extract_text() for p in PdfReader(f).pages if p.extract_text())
         add_to_memory(text)
-        st.success("Document stored")
+        st.success("📚 Document stored in memory")
 
 # ---------- VOICE ----------
-
 with tabs[2]:
-    vq = st.text_input("Voice question")
+    vq = st.text_input("Ask by voice text")
     if vq:
         mem = search_memory(vq)
         ans = agent_workflow(vq, mem)
@@ -286,32 +237,51 @@ with tabs[2]:
         speak(ans)
 
 # ---------- AUTOMATION ----------
-
 with tabs[3]:
-    task = st.text_area("Describe task for AI agents")
-    if st.button("Run"):
+    task = st.text_area("Describe administrative task")
+    if st.button("Run Automation"):
         mem = search_memory(task)
         res = agent_workflow(task, mem)
         st.markdown(res)
 
-# ---------- CODE LAB AUTO PIPELINE ----------
-
+# ---------- CODE LAB (AUTO-FIX PIPELINE) ----------
 with tabs[4]:
-    st.subheader("💻 One-Click Auto-Fix Code Lab")
+    st.subheader("💻 Auto-Fix Code Lab")
 
     project = st.text_area(
-        "Describe system",
-        placeholder="Build production-ready bus booking system"
+        "Describe system to build",
+        placeholder="Build citizen complaint management system"
     )
 
     if st.button("🚀 Generate Error-Free Code"):
-        arch, final_code = code_pipeline(project)
+        # Step 1: Generate code
+        code = call_ai([
+            {"role": "system", "content": "You are a senior software engineer"},
+            {"role": "user", "content": project + "\nGenerate production-ready Python code"}
+        ], model=MODELS["Coding Model"], max_tokens=800)
 
-        st.markdown("### 🧱 Architecture")
-        st.code(arch)
+        # Step 2: Fix bugs
+        fixed = call_ai([
+            {"role": "system", "content": "Fix all bugs and missing imports"},
+            {"role": "user", "content": code}
+        ], model=MODELS["Coding Model"], max_tokens=600)
 
-        st.markdown("### ✅ Final Production Code")
-        st.code(final_code, language="python")
+        # Step 3: Optimize
+        optimized = call_ai([
+            {"role": "system", "content": "Optimize for performance and stability"},
+            {"role": "user", "content": fixed}
+        ], model=MODELS["Coding Model"], max_tokens=600)
+
+        # Step 4: Final review
+        final = call_ai([
+            {"role": "system", "content": "Review and output final clean production code only"},
+            {"role": "user", "content": optimized}
+        ], model=MODELS["Coding Model"], max_tokens=700)
+
+        st.session_state.generated_code = final
+
+    if st.session_state.generated_code:
+        st.code(st.session_state.generated_code, language="python")
 
 # ======================
 # LOGOUT
