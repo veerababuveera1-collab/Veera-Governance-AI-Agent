@@ -1,95 +1,216 @@
 import streamlit as st
-import requests
-import os
+import requests, os, time, faiss, numpy as np
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
+import streamlit.components.v1 as components
 
-# ============================
-# CONFIG
-# ============================
+# ======================
+# AUTH (demo users)
+# ======================
 
-API_KEY = os.getenv("OPENROUTER_API_KEY")
+USERS = {"admin": "1234", "veera": "ai2026"}
 
-if not API_KEY:
-    st.error("❌ OPENROUTER_API_KEY not found. Add it in GitHub/Streamlit secrets.")
+def login():
+    st.subheader("🔐 Login")
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if USERS.get(u) == p:
+            st.session_state.user = u
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
+
+if "user" not in st.session_state:
+    login()
     st.stop()
 
-MODEL_NAME = "meta-llama/llama-3-70b-instruct"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# ======================
+# CONFIG
+# ======================
 
-SYSTEM_PROMPT = """
-You are Veera's Governance AI Agent.
-You think in systems, explain clearly, and always propose next actions.
+API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not API_KEY:
+    st.error("Missing OPENROUTER_API_KEY")
+    st.stop()
+
+URL = "https://openrouter.ai/api/v1/chat/completions"
+MODEL = "meta-llama/llama-3-70b-instruct"
+
+# ======================
+# EMBEDDINGS (cached)
+# ======================
+
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+embedder = load_embedder()
+
+# ======================
+# VECTOR DATABASE
+# ======================
+
+DIM = 384
+index = faiss.IndexFlatIP(DIM)
+doc_chunks = []
+
+def smart_chunks(text, size=400, overlap=60):
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), size - overlap):
+        chunks.append(" ".join(words[i:i + size]))
+    return chunks
+
+def add_to_memory(text):
+    chunks = smart_chunks(text)
+    vecs = embedder.encode(chunks, normalize_embeddings=True)
+    index.add(vecs.astype("float32"))
+    doc_chunks.extend(chunks)
+
+def search_memory(q, k=4):
+    if index.ntotal == 0:
+        return ""
+    qv = embedder.encode([q], normalize_embeddings=True).astype("float32")
+    _, ids = index.search(qv, k)
+    return "\n".join(doc_chunks[i] for i in ids[0])
+
+# ======================
+# LLM CALL (safe retry)
+# ======================
+
+def call_ai(messages, retries=2):
+    for _ in range(retries):
+        try:
+            r = requests.post(
+                URL,
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={"model": MODEL, "messages": messages},
+                timeout=60
+            )
+            return r.json()["choices"][0]["message"]["content"]
+        except:
+            time.sleep(1)
+    return "⚠️ AI service unavailable"
+
+# ======================
+# MULTI-AGENT BRAIN
+# ======================
+
+AGENTS = {
+    "planner": "Break into clear steps",
+    "researcher": "Give insights and facts",
+    "architect": "Design scalable solution",
+    "qa": "Find risks and flaws"
+}
+
+def agent_workflow(q, context):
+    outputs = {}
+
+    for name, role in AGENTS.items():
+        outputs[name] = call_ai([
+            {"role": "system", "content": role},
+            {"role": "user", "content": context + "\n" + q}
+        ])
+
+    merged = f"""
+Planner: {outputs['planner']}
+Researcher: {outputs['researcher']}
+Architect: {outputs['architect']}
+QA: {outputs['qa']}
 """
+    return call_ai([
+        {"role": "system", "content": "Combine into enterprise-grade answer"},
+        {"role": "user", "content": merged}
+    ])
 
+# ======================
+# CLOUD SAFE VOICE OUTPUT
+# ======================
 
-# ============================
-# LLM CALL
-# ============================
+def speak_browser(text):
+    components.html(f"""
+    <script>
+    const msg = new SpeechSynthesisUtterance({repr(text)});
+    window.speechSynthesis.speak(msg);
+    </script>
+    """, height=0)
 
-def call_agent(messages):
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages
-    }
+# ======================
+# UI
+# ======================
 
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
-    }
+st.set_page_config("Veera Enterprise AI Platform", layout="wide")
+st.title("🚀 Veera Enterprise AI Platform")
 
-    try:
-        r = requests.post(
-            OPENROUTER_URL,
-            headers=headers,
-            json=payload,
-            timeout=60
+tabs = st.tabs(["💬 AI Chat", "📄 Document Memory", "🎤 Voice Reply", "⚙️ Automation"])
+
+# -------- CHAT --------
+
+with tabs[0]:
+
+    if "chat" not in st.session_state:
+        st.session_state.chat = []
+
+    for m in st.session_state.chat:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    q = st.chat_input("Ask anything...")
+
+    if q:
+        mem = search_memory(q)
+        ans = agent_workflow(q, mem)
+
+        st.session_state.chat += [
+            {"role": "user", "content": q},
+            {"role": "assistant", "content": ans}
+        ]
+        st.rerun()
+
+# -------- DOCUMENT RAG --------
+
+with tabs[1]:
+
+    f = st.file_uploader("Upload PDF", type="pdf")
+
+    if f:
+        text = "".join(
+            p.extract_text() for p in PdfReader(f).pages if p.extract_text()
         )
+        add_to_memory(text)
+        st.success("📚 Document stored in vector memory")
 
-        data = r.json()
+# -------- VOICE OUTPUT --------
 
-        if "error" in data:
-            return f"❌ {data['error']['message']}"
+with tabs[2]:
 
-        return data["choices"][0]["message"]["content"]
+    st.info("Type → AI answers + speaks (cloud safe)")
 
-    except Exception as e:
-        return f"⚠️ {str(e)}"
+    voice_q = st.text_input("Type your question for voice reply")
 
+    if voice_q:
+        mem = search_memory(voice_q)
+        ans = agent_workflow(voice_q, mem)
+        st.markdown(ans)
+        speak_browser(ans)
 
-# ============================
-# STREAMLIT UI
-# ============================
+# -------- AUTOMATION --------
 
-st.set_page_config(page_title="Veera Governance AI", layout="centered")
+with tabs[3]:
 
-st.title("🧠 Veera's Governance AI Agent")
-st.caption("OpenRouter · Llama-3 70B · Systems Thinking AI")
+    task = st.text_area("Describe task for AI agents")
 
-if "chat" not in st.session_state:
-    st.session_state.chat = []
+    if st.button("Run Automation"):
+        mem = search_memory(task)
+        result = agent_workflow(task, mem)
+        st.markdown(result)
 
-# Show chat history
-for msg in st.session_state.chat:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+# -------- LOGOUT --------
 
-# User input
-prompt = st.chat_input("Ask about governance, KPIs, defects, architecture...")
-
-if prompt:
-    # Add user message
-    st.session_state.chat.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Get AI reply
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            reply = call_agent(st.session_state.chat)
-            st.markdown(reply)
-
-    st.session_state.chat.append({"role": "assistant", "content": reply})
-
-# Clear button
-if st.button("🧹 Clear chat"):
-    st.session_state.chat = []
+if st.sidebar.button("Logout"):
+    st.session_state.clear()
     st.rerun()
