@@ -5,13 +5,20 @@ from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
 
 # ======================
+# PAGE CONFIG
+# ======================
+
+st.set_page_config("Veera-Governance-AI-Agent", layout="wide")
+st.title("🏛️ Veera-Governance-AI-Agent")
+
+# ======================
 # AUTH
 # ======================
 
 USERS = {"admin": "1234", "veera": "ai2026"}
 
 def login():
-    st.subheader("🔐 Login")
+    st.subheader("🔐 Secure Login")
     u = st.text_input("Username")
     p = st.text_input("Password", type="password")
     if st.button("Login"):
@@ -35,11 +42,38 @@ if not API_KEY:
     st.stop()
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "meta-llama/llama-3-70b-instruct"
 
 # ======================
-# SESSION STATE (CODE LAB)
+# MULTI-MODEL CONFIG
 # ======================
+
+MODELS = {
+    "fast": "stepfun/step-3.5-flash",
+    "main": "moonshotai/kimi-k2.5",
+    "coding": "qwen/qwen3-coder-next",
+    "reasoning": "anthropic/claude-opus-4.6",
+    "fallback": "arcee/trinity-large-preview"
+}
+
+MASTER_PROMPT = """
+You are Veera-Governance-AI-Agent,
+an intelligent AI system for governance, administration, and citizen services.
+
+Core responsibilities:
+1. Assist citizens and officials.
+2. Provide accurate, policy-based responses.
+3. Use document memory when available.
+4. Be professional, clear, and secure.
+5. Do not hallucinate unknown facts.
+6. If unsure, escalate to human support.
+"""
+
+# ======================
+# SESSION STATE
+# ======================
+
+if "chat" not in st.session_state:
+    st.session_state.chat = []
 
 if "current_step" not in st.session_state:
     st.session_state.current_step = 0
@@ -86,20 +120,52 @@ def search_memory(q, k=4):
     return "\n".join(doc_chunks[i] for i in ids[0])
 
 # ======================
-# SAFE LLM CALL (TOKEN SAFE)
+# INTENT + MODEL ROUTER
 # ======================
 
-def call_ai(messages, max_tokens=800, retries=2):
+def detect_intent(text):
+    t = text.lower()
+
+    if any(x in t for x in ["error", "bug", "api", "code", "crash"]):
+        return "technical"
+    if any(x in t for x in ["plan", "price", "cost", "difference"]):
+        return "sales"
+    if any(x in t for x in ["refund", "charged", "billing"]):
+        return "billing"
+    if any(x in t for x in ["delete", "remove account"]):
+        return "deletion"
+
+    return "general"
+
+def route_model(intent):
+    if intent == "technical":
+        return MODELS["coding"]
+    elif intent == "billing":
+        return MODELS["fast"]
+    elif intent == "sales":
+        return MODELS["main"]
+    elif intent == "general":
+        return MODELS["main"]
+    else:
+        return MODELS["fallback"]
+
+# ======================
+# SAFE LLM CALL
+# ======================
+
+def call_ai(messages, model, max_tokens=800, retries=2):
     for _ in range(retries):
         try:
             r = requests.post(
                 URL,
                 headers={
                     "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://veeratech.ai",
+                    "X-Title": "Veera Governance AI"
                 },
                 json={
-                    "model": MODEL,
+                    "model": model,
                     "messages": messages,
                     "max_tokens": max_tokens
                 },
@@ -122,31 +188,22 @@ def call_ai(messages, max_tokens=800, retries=2):
     return "❌ AI service unavailable"
 
 # ======================
-# MULTI AGENT (THINKING)
+# AGENT WORKFLOW
 # ======================
-
-AGENTS = {
-    "planner": "Break into steps",
-    "researcher": "Provide technical insights",
-    "architect": "Design scalable system",
-    "qa": "Find risks and gaps"
-}
 
 def agent_workflow(q, context):
-    outputs = []
-    for role in AGENTS.values():
-        outputs.append(call_ai([
-            {"role": "system", "content": role},
-            {"role": "user", "content": context + "\n" + q}
-        ], max_tokens=400))
+    intent = detect_intent(q)
+    model = route_model(intent)
 
-    return call_ai([
-        {"role": "system", "content": "Create enterprise-grade final solution"},
-        {"role": "user", "content": "\n".join(outputs)}
-    ], max_tokens=700)
+    messages = [
+        {"role": "system", "content": MASTER_PROMPT},
+        {"role": "user", "content": context + "\n" + q}
+    ]
+
+    return call_ai(messages, model=model, max_tokens=700)
 
 # ======================
-# CLOUD SAFE VOICE
+# VOICE
 # ======================
 
 def speak(text):
@@ -176,31 +233,25 @@ def next_file():
     return FILE_ORDER[idx] if idx < len(FILE_ORDER) else None
 
 # ======================
-# UI
+# UI TABS
 # ======================
 
-st.set_page_config("Veera Enterprise AI Platform", layout="wide")
-st.title("🚀 Veera Enterprise AI Platform")
-
 tabs = st.tabs([
-    "💬 AI Chat",
-    "📄 Document Memory",
-    "🎤 Voice Reply",
-    "⚙️ Automation",
+    "💬 Citizen & Officer Chat",
+    "📄 Policy Document Memory",
+    "🎤 Voice Assistant",
+    "⚙️ Automation Agent",
     "💻 Code Lab"
 ])
 
-# ---------- AI CHAT ----------
+# ---------- CHAT ----------
 
 with tabs[0]:
-    if "chat" not in st.session_state:
-        st.session_state.chat = []
-
     for m in st.session_state.chat:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    q = st.chat_input("Ask anything...")
+    q = st.chat_input("Ask governance question...")
     if q:
         mem = search_memory(q)
         ans = agent_workflow(q, mem)
@@ -213,16 +264,16 @@ with tabs[0]:
 # ---------- DOCUMENT MEMORY ----------
 
 with tabs[1]:
-    f = st.file_uploader("Upload PDF", type="pdf")
+    f = st.file_uploader("Upload policy PDF", type="pdf")
     if f:
         text = "".join(p.extract_text() for p in PdfReader(f).pages if p.extract_text())
         add_to_memory(text)
-        st.success("📚 Document stored in AI memory")
+        st.success("📚 Document stored in governance memory")
 
 # ---------- VOICE ----------
 
 with tabs[2]:
-    vq = st.text_input("Ask for voice reply")
+    vq = st.text_input("Ask by voice text")
     if vq:
         mem = search_memory(vq)
         ans = agent_workflow(vq, mem)
@@ -232,84 +283,51 @@ with tabs[2]:
 # ---------- AUTOMATION ----------
 
 with tabs[3]:
-    task = st.text_area("Describe task for AI agents")
+    task = st.text_area("Describe administrative task")
     if st.button("Run Automation"):
         mem = search_memory(task)
         res = agent_workflow(task, mem)
         st.markdown(res)
 
-# ---------- TOKEN SAFE CODE LAB ----------
+# ---------- CODE LAB ----------
 
 with tabs[4]:
-    st.subheader("💻 Token-Safe Multi-Agent Code Lab")
+    st.subheader("💻 Government IT Code Lab")
 
     project = st.text_area(
-        "Describe project once",
-        placeholder="Build production-ready bus booking system like RedBus"
+        "Describe system to build",
+        placeholder="Build digital land record system"
     )
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3 = st.columns(3)
 
     with c1:
         if st.button("🧱 Architecture"):
-            if st.session_state.current_step > 0:
-                st.info("Architecture already generated")
-            else:
-                arch = call_ai([
-                    {"role": "system", "content": "You are a senior software architect"},
-                    {"role": "user", "content": project + "\nCreate folder structure only"}
-                ], max_tokens=600)
-                st.session_state.project_architecture = arch
-                st.session_state.current_step = 1
-                st.code(arch)
+            arch = call_ai([
+                {"role": "system", "content": MASTER_PROMPT},
+                {"role": "user", "content": project + "\nCreate folder structure"}
+            ], model=MODELS["reasoning"], max_tokens=600)
+            st.code(arch)
 
     with c2:
-        if st.button("📄 Next File"):
-            if st.session_state.current_step == 0:
-                st.warning("Generate architecture first")
-            else:
-                file = next_file()
-                if not file:
-                    st.info("All files generated")
-                elif file in st.session_state.generated_files:
-                    st.info(f"{file} already exists")
-                else:
-                    code = call_ai([
-                        {"role": "system", "content": "Write clean production-ready Python code"},
-                        {"role": "user", "content": f"Generate ONLY {file} for:\n{project}"}
-                    ], max_tokens=1200)
-                    st.session_state.generated_files[file] = code
-                    st.session_state.current_step += 1
-                    st.code(code, language="python")
+        if st.button("📄 Generate Module"):
+            code = call_ai([
+                {"role": "system", "content": MASTER_PROMPT},
+                {"role": "user", "content": project + "\nGenerate production code"}
+            ], model=MODELS["coding"], max_tokens=1000)
+            st.code(code, language="python")
 
     with c3:
-        if st.button("🐞 Fix Bugs"):
-            combined = "\n".join(st.session_state.generated_files.values())
-            fix = call_ai([
-                {"role": "system", "content": "Fix bugs only"},
-                {"role": "user", "content": combined}
-            ], max_tokens=500)
-            st.code(fix)
-
-    with c4:
-        if st.button("⚡ Optimize"):
-            combined = "\n".join(st.session_state.generated_files.values())
-            opt = call_ai([
-                {"role": "system", "content": "Optimize performance and stability"},
-                {"role": "user", "content": combined}
-            ], max_tokens=400)
-            st.code(opt)
-
-    with c5:
-        if st.button("🔁 Review"):
-            combined = "\n".join(st.session_state.generated_files.values())
+        if st.button("🔁 Review System"):
             review = call_ai([
-                {"role": "system", "content": "Review for production readiness"},
-                {"role": "user", "content": combined}
-            ], max_tokens=500)
+                {"role": "system", "content": MASTER_PROMPT},
+                {"role": "user", "content": project + "\nReview system"}
+            ], model=MODELS["reasoning"], max_tokens=600)
             st.markdown(review)
 
-# ---------- LOGOUT ----------
+# ======================
+# LOGOUT
+# ======================
 
 if st.sidebar.button("Logout"):
     st.session_state.clear()
