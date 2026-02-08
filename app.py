@@ -1,22 +1,56 @@
 import streamlit as st
-import requests, os, time, faiss, numpy as np
+import requests
+import os
+import time
+import faiss
+import numpy as np
+import json
+import hashlib
+from datetime import datetime
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
-import streamlit.components.v1 as components
-from datetime import datetime
 
-# ======================
-# AUTH
-# ======================
+# =========================
+# CONFIG
+# =========================
 
-USERS = {"admin": "1234", "veera": "ai2026"}
+APP_NAME = "Veera Enterprise AI"
+MODEL = "meta-llama/llama-3-70b-instruct"
+API_URL = "https://openrouter.ai/api/v1/chat/completions"
+API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+if not API_KEY:
+    st.error("Missing OPENROUTER_API_KEY")
+    st.stop()
+
+DATA_DIR = "data"
+MEMORY_INDEX = f"{DATA_DIR}/memory.index"
+MEMORY_CHUNKS = f"{DATA_DIR}/chunks.json"
+USERS_FILE = f"{DATA_DIR}/users.json"
+LOG_FILE = f"{DATA_DIR}/activity.log"
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# =========================
+# SECURITY
+# =========================
+
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        return json.load(open(USERS_FILE))
+    return {"admin": hash_password("admin123")}
+
+users = load_users()
 
 def login():
-    st.subheader("🔐 Login")
+    st.subheader("🔐 Secure Login")
     u = st.text_input("Username")
     p = st.text_input("Password", type="password")
     if st.button("Login"):
-        if USERS.get(u) == p:
+        if u in users and users[u] == hash_password(p):
             st.session_state.user = u
             st.rerun()
         else:
@@ -26,358 +60,198 @@ if "user" not in st.session_state:
     login()
     st.stop()
 
-# ======================
-# CONFIG
-# ======================
+# =========================
+# LOGGING
+# =========================
 
-API_KEY = os.getenv("OPENROUTER_API_KEY")
-if not API_KEY:
-    st.error("Missing OPENROUTER_API_KEY")
-    st.stop()
+def log_activity(msg):
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{datetime.now()} | {msg}\n")
 
-URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "meta-llama/llama-3-70b-instruct"
+# =========================
+# AI CORE
+# =========================
 
-# ======================
-# SAFE LLM CALL
-# ======================
+def call_ai(messages, max_tokens=1000):
+    try:
+        r = requests.post(
+            API_URL,
+            headers={
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": MODEL,
+                "messages": messages,
+                "max_tokens": max_tokens
+            },
+            timeout=60
+        )
+        data = r.json()
+        if "choices" in data:
+            return data["choices"][0]["message"]["content"]
+    except:
+        pass
+    return "AI service unavailable"
 
-def call_ai(messages, max_tokens=1000, retries=2):
-    for _ in range(retries):
-        try:
-            r = requests.post(
-                URL,
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": MODEL,
-                    "messages": messages,
-                    "max_tokens": max_tokens
-                },
-                timeout=60
-            )
-            data = r.json()
+# =========================
+# AGENT CLASS
+# =========================
 
-            if "choices" in data:
-                return data["choices"][0]["message"]["content"]
-
-            if "error" in data:
-                return f"⚠️ AI Error: {data['error'].get('message','Unknown')}"
-
-            return "⚠️ Empty response"
-
-        except Exception:
-            time.sleep(1)
-
-    return "❌ AI service unavailable"
-
-# ======================
-# AGENTS
-# ======================
-
-class BaseAgent:
-    def __init__(self, system_prompt):
+class Agent:
+    def __init__(self, name, system_prompt):
+        self.name = name
         self.system_prompt = system_prompt
 
-    def run(self, user_input, context=""):
+    def run(self, task, context=""):
         return call_ai([
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": context + "\n" + user_input}
+            {"role": "user", "content": context + "\n" + task}
         ])
 
-class ChatAgent(BaseAgent):
-    def __init__(self):
-        super().__init__("You are a helpful AI assistant.")
+# =========================
+# AGENT DEFINITIONS
+# =========================
 
-class AutomationAgent(BaseAgent):
-    def __init__(self):
-        super().__init__("You are an automation AI. Provide step-by-step execution.")
+planner = Agent("Planner",
+    "Break the goal into clear step-by-step tasks.")
 
-class CodeAgent(BaseAgent):
-    def __init__(self):
-        super().__init__("""
-You are a senior software engineer.
+researcher = Agent("Researcher",
+    "Retrieve relevant context and information.")
 
-You must generate a COMPLETE, SINGLE-FILE, FULLY RUNNABLE program.
+executor = Agent("Executor",
+    "Execute the task and produce results.")
 
-STRICT RULES:
-- Output ONLY code
-- No explanations
-- No partial classes
-- No continuation
-- No placeholders
-- Include all imports
-- Include all classes and functions
-- Include main entry point
-- Must run immediately
-""")
+coder = Agent("Coder",
+    "Write clean, runnable code if needed.")
 
-class SecurityAgent(BaseAgent):
-    def __init__(self):
-        super().__init__("""
-You are a senior security engineer.
+critic = Agent("Critic",
+    "Review the output. Say OK if correct, or FIX with reason.")
 
-Scan the code and detect:
-- Hardcoded secrets
-- SQL injection
-- Unsafe eval/exec
-- Insecure file handling
-- Weak authentication logic
+supervisor = Agent("Supervisor",
+    "Decide whether to CONTINUE, FIX, or FINISH.")
 
-Output:
-1. Issues
-2. Risk level
-3. Fix suggestions
-""")
-
-    def scan(self, code):
-        return call_ai([
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": code}
-        ], max_tokens=600)
-
-class AgentController:
-    def __init__(self):
-        self.chat = ChatAgent()
-        self.automation = AutomationAgent()
-        self.code = CodeAgent()
-        self.security = SecurityAgent()
-
-controller = AgentController()
-
-# ======================
+# =========================
 # MEMORY SYSTEM
-# ======================
+# =========================
 
 @st.cache_resource
 def load_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 embedder = load_embedder()
-
 DIM = 384
-index = faiss.IndexFlatIP(DIM)
-doc_chunks = []
 
-def chunk_text(text, size=400, overlap=60):
-    words = text.split()
-    return [" ".join(words[i:i+size]) for i in range(0, len(words), size-overlap)]
+def load_memory():
+    if os.path.exists(MEMORY_INDEX):
+        index = faiss.read_index(MEMORY_INDEX)
+        chunks = json.load(open(MEMORY_CHUNKS))
+    else:
+        index = faiss.IndexFlatIP(DIM)
+        chunks = []
+    return index, chunks
 
-def add_to_memory(text):
-    chunks = chunk_text(text)
-    vecs = embedder.encode(chunks, normalize_embeddings=True)
-    index.add(vecs.astype("float32"))
-    doc_chunks.extend(chunks)
+index, doc_chunks = load_memory()
 
 def search_memory(q, k=4):
     if index.ntotal == 0:
         return ""
     qv = embedder.encode([q], normalize_embeddings=True).astype("float32")
     _, ids = index.search(qv, k)
-    return "\n".join(doc_chunks[i] for i in ids[0])
+    return "\n".join(doc_chunks[i] for i in ids[0] if i < len(doc_chunks))
 
-# ======================
-# SESSION STATE
-# ======================
+# =========================
+# AUTONOMOUS EXECUTION LOOP
+# =========================
 
-if "projects" not in st.session_state:
-    st.session_state.projects = ["Default Project"]
+def autonomous_run(goal, max_steps=4):
+    log = []
+    context = ""
 
-if "activity" not in st.session_state:
-    st.session_state.activity = []
+    # Step 1: Planning
+    plan = planner.run(goal)
+    log.append(f"🧠 PLAN:\n{plan}")
 
-if "chat" not in st.session_state:
-    st.session_state.chat = []
+    steps = plan.split("\n")
 
-# ======================
-# VOICE
-# ======================
+    for i, step in enumerate(steps[:max_steps]):
+        log.append(f"⚙️ STEP {i+1}: {step}")
 
-def speak(text):
-    components.html(f"""
-    <script>
-    const msg = new SpeechSynthesisUtterance({repr(text)});
-    speechSynthesis.speak(msg);
-    </script>
-    """, height=0)
+        memory = search_memory(step)
+        research = researcher.run(step, memory)
 
-# ======================
+        result = executor.run(step, research)
+        review = critic.run(result)
+
+        log.append(f"📊 RESULT:\n{result}")
+        log.append(f"🔍 REVIEW:\n{review}")
+
+        decision = supervisor.run(review)
+
+        log.append(f"🧭 DECISION: {decision}")
+
+        if "FINISH" in decision.upper():
+            break
+
+    return "\n\n".join(log)
+
+# =========================
 # UI
-# ======================
+# =========================
 
-st.set_page_config("Veera Enterprise AI", layout="wide")
+st.set_page_config(APP_NAME, layout="wide")
 st.title("🚀 Veera Enterprise AI Platform")
 
 menu = st.sidebar.radio(
     "Navigation",
-    [
-        "Dashboard",
-        "Projects",
-        "Code Lab",
-        "Security",
-        "Automation",
-        "AI Chat",
-        "Activity",
-        "Billing"
-    ]
+    ["Dashboard", "AI Chat", "Autonomous Mode", "Activity"]
 )
 
-# ======================
+# =========================
 # DASHBOARD
-# ======================
+# =========================
 
 if menu == "Dashboard":
-    st.subheader("Dashboard")
-    st.metric("Projects", len(st.session_state.projects))
-    st.metric("Activity Logs", len(st.session_state.activity))
+    st.metric("Memory Chunks", len(doc_chunks))
+    st.metric("User", st.session_state.user)
 
-    st.write("Recent Activity:")
-    for a in st.session_state.activity[-5:]:
-        st.write("•", a)
-
-# ======================
-# PROJECTS
-# ======================
-
-elif menu == "Projects":
-    st.subheader("Projects")
-
-    new_proj = st.text_input("New project name")
-    if st.button("Create Project") and new_proj:
-        st.session_state.projects.append(new_proj)
-        st.success("Project created")
-
-    for p in st.session_state.projects:
-        st.write("•", p)
-
-# ======================
-# CODE LAB (CORE)
-# ======================
-
-elif menu == "Code Lab":
-    st.subheader("💻 Code Lab")
-
-    project = st.text_area(
-        "Describe your system",
-        placeholder="Build a hospital appointment system"
-    )
-
-    mode = st.selectbox(
-        "Output type",
-        ["Python Script", "Streamlit App", "FastAPI API"]
-    )
-
-    if st.button("Generate Executable Code"):
-        if not project.strip():
-            st.warning("Please describe a system.")
-        else:
-            base_prompt = controller.code.system_prompt
-
-            if mode == "Streamlit App":
-                base_prompt += "\nCreate a Streamlit app runnable with: streamlit run app.py"
-            elif mode == "FastAPI API":
-                base_prompt += "\nCreate a FastAPI app runnable with: uvicorn app:app --reload"
-            else:
-                base_prompt += "\nCreate a Python script runnable with: python app.py"
-
-            initial_code = call_ai([
-                {"role": "system", "content": base_prompt},
-                {"role": "user", "content": project}
-            ], max_tokens=1800)
-
-            fix_prompt = """
-Review the following code and ensure:
-- Fully executable
-- No syntax errors
-- All imports included
-- Has valid entry point
-
-Fix issues and output full code only.
-"""
-
-            final_code = call_ai([
-                {"role": "system", "content": fix_prompt},
-                {"role": "user", "content": initial_code}
-            ], max_tokens=1800)
-
-            st.success("Executable code generated")
-            st.code(final_code, language="python")
-
-            st.download_button(
-                "Download app.py",
-                final_code,
-                file_name="app.py"
-            )
-
-            # Security scan
-            report = controller.security.scan(final_code)
-            st.subheader("Security Report")
-            st.markdown(report)
-
-            st.session_state.activity.append(
-                f"{datetime.now().strftime('%H:%M:%S')} - Code generated"
-            )
-
-# ======================
-# SECURITY
-# ======================
-
-elif menu == "Security":
-    st.subheader("Security Center")
-    st.write("Security scans appear after code generation.")
-
-# ======================
-# AUTOMATION
-# ======================
-
-elif menu == "Automation":
-    task = st.text_area("Describe task")
-    if st.button("Run Automation"):
-        res = controller.automation.run(task)
-        st.write(res)
-        st.session_state.activity.append(
-            f"{datetime.now().strftime('%H:%M:%S')} - Automation run"
-        )
-
-# ======================
+# =========================
 # CHAT
-# ======================
+# =========================
 
 elif menu == "AI Chat":
-    for m in st.session_state.chat:
-        st.write(m)
-
-    q = st.text_input("Ask something")
+    q = st.text_input("Ask AI")
     if q:
         mem = search_memory(q)
-        ans = controller.chat.run(q, mem)
+        ans = executor.run(q, mem)
         st.write(ans)
-        st.session_state.chat.append(q)
-        st.session_state.chat.append(ans)
+        log_activity("Chat used")
 
-# ======================
+# =========================
+# AUTONOMOUS MODE
+# =========================
+
+elif menu == "Autonomous Mode":
+    st.subheader("🤖 Autonomous AI Task Execution")
+
+    goal = st.text_area("Describe your goal")
+
+    if st.button("Run Autonomous AI") and goal:
+        output = autonomous_run(goal)
+        st.text_area("Execution Log", output, height=500)
+        log_activity("Autonomous run executed")
+
+# =========================
 # ACTIVITY
-# ======================
+# =========================
 
 elif menu == "Activity":
-    st.subheader("Activity Logs")
-    for a in st.session_state.activity:
-        st.write("•", a)
+    if os.path.exists(LOG_FILE):
+        st.text(open(LOG_FILE).read())
 
-# ======================
-# BILLING
-# ======================
-
-elif menu == "Billing":
-    st.subheader("Billing")
-    st.write("Plan: Starter")
-    st.write("Usage: 20,000 tokens")
-
-# ======================
+# =========================
 # LOGOUT
-# ======================
+# =========================
 
 if st.sidebar.button("Logout"):
     st.session_state.clear()
