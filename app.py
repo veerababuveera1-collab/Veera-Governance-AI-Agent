@@ -48,11 +48,11 @@ URL = "https://openrouter.ai/api/v1/chat/completions"
 # ======================
 
 MODELS = {
-    "fast": "stepfun/step-3.5-flash",
-    "main": "moonshotai/kimi-k2.5",
-    "coding": "qwen/qwen3-coder-next",
-    "reasoning": "anthropic/claude-opus-4.6",
-    "fallback": "arcee/trinity-large-preview"
+    "fast": "stepfun/step-3.5-flash",        # free
+    "main": "moonshotai/kimi-k2.5",          # paid
+    "coding": "qwen/qwen3-coder-next",       # low cost
+    "reasoning": "anthropic/claude-opus-4.6",# paid
+    "fallback": "arcee/trinity-large-preview" # free
 }
 
 MASTER_PROMPT = """
@@ -74,15 +74,6 @@ Core responsibilities:
 
 if "chat" not in st.session_state:
     st.session_state.chat = []
-
-if "current_step" not in st.session_state:
-    st.session_state.current_step = 0
-
-if "generated_files" not in st.session_state:
-    st.session_state.generated_files = {}
-
-if "project_architecture" not in st.session_state:
-    st.session_state.project_architecture = None
 
 # ======================
 # EMBEDDINGS
@@ -150,40 +141,58 @@ def route_model(intent):
         return MODELS["fallback"]
 
 # ======================
-# SAFE LLM CALL
+# SAFE LLM CALL WITH FALLBACK
 # ======================
 
-def call_ai(messages, model, max_tokens=800, retries=2):
+def call_ai(messages, model, max_tokens=450, retries=2):
+
+    def send_request(model_name):
+        r = requests.post(
+            URL,
+            headers={
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://veeratech.ai",
+                "X-Title": "Veera Governance AI"
+            },
+            json={
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": max_tokens
+            },
+            timeout=60
+        )
+        return r.json()
+
+    # Try primary model
     for _ in range(retries):
         try:
-            r = requests.post(
-                URL,
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://veeratech.ai",
-                    "X-Title": "Veera Governance AI"
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": max_tokens
-                },
-                timeout=60
-            )
-
-            data = r.json()
+            data = send_request(model)
 
             if "choices" in data:
                 return data["choices"][0]["message"]["content"]
 
             if "error" in data:
-                return f"⚠️ AI Error: {data['error'].get('message','Unknown')}"
+                err = data["error"].get("message", "").lower()
 
-            return "⚠️ Empty response"
+                if any(x in err for x in [
+                    "credit", "token", "insufficient", "payment", "afford"
+                ]):
+                    break
+
+                return f"⚠️ AI Error: {data['error'].get('message','Unknown')}"
 
         except Exception:
             time.sleep(1)
+
+    # Fallback to free model
+    try:
+        data = send_request(MODELS["fallback"])
+        if "choices" in data:
+            return "⚠️ Switched to free model:\n\n" + \
+                   data["choices"][0]["message"]["content"]
+    except:
+        pass
 
     return "❌ AI service unavailable"
 
@@ -200,7 +209,7 @@ def agent_workflow(q, context):
         {"role": "user", "content": context + "\n" + q}
     ]
 
-    return call_ai(messages, model=model, max_tokens=700)
+    return call_ai(messages, model=model, max_tokens=450)
 
 # ======================
 # VOICE
@@ -215,24 +224,6 @@ def speak(text):
     """, height=0)
 
 # ======================
-# CODE LAB HELPERS
-# ======================
-
-FILE_ORDER = [
-    "database.py",
-    "auth.py",
-    "booking_engine.py",
-    "seat_management.py",
-    "payment.py",
-    "admin.py",
-    "app.py"
-]
-
-def next_file():
-    idx = st.session_state.current_step - 1
-    return FILE_ORDER[idx] if idx < len(FILE_ORDER) else None
-
-# ======================
 # UI TABS
 # ======================
 
@@ -240,8 +231,7 @@ tabs = st.tabs([
     "💬 Citizen & Officer Chat",
     "📄 Policy Document Memory",
     "🎤 Voice Assistant",
-    "⚙️ Automation Agent",
-    "💻 Code Lab"
+    "⚙️ Automation Agent"
 ])
 
 # ---------- CHAT ----------
@@ -288,42 +278,6 @@ with tabs[3]:
         mem = search_memory(task)
         res = agent_workflow(task, mem)
         st.markdown(res)
-
-# ---------- CODE LAB ----------
-
-with tabs[4]:
-    st.subheader("💻 Government IT Code Lab")
-
-    project = st.text_area(
-        "Describe system to build",
-        placeholder="Build digital land record system"
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        if st.button("🧱 Architecture"):
-            arch = call_ai([
-                {"role": "system", "content": MASTER_PROMPT},
-                {"role": "user", "content": project + "\nCreate folder structure"}
-            ], model=MODELS["reasoning"], max_tokens=600)
-            st.code(arch)
-
-    with c2:
-        if st.button("📄 Generate Module"):
-            code = call_ai([
-                {"role": "system", "content": MASTER_PROMPT},
-                {"role": "user", "content": project + "\nGenerate production code"}
-            ], model=MODELS["coding"], max_tokens=1000)
-            st.code(code, language="python")
-
-    with c3:
-        if st.button("🔁 Review System"):
-            review = call_ai([
-                {"role": "system", "content": MASTER_PROMPT},
-                {"role": "user", "content": project + "\nReview system"}
-            ], model=MODELS["reasoning"], max_tokens=600)
-            st.markdown(review)
 
 # ======================
 # LOGOUT
