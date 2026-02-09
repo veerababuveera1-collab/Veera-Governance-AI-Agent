@@ -1,7 +1,7 @@
-streamlit>=1.30.0
-requests>=2.31.0
-numpy>=1.24.0
-pypdf>=4.0.0
-sentence-transformers>=2.6.0
-torch>=2.0.0
-faiss-cpu>=1.7.4
+streamlit
+requests
+faiss-cpu
+numpy
+pypdf
+sentence-transformers
+python-dotenv
