@@ -5,6 +5,12 @@ from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
 import zipfile
 import tempfile
+from dotenv import load_dotenv
+
+# ======================
+# LOAD ENV
+# ======================
+load_dotenv()
 
 # ======================
 # LOGGING
@@ -12,10 +18,10 @@ import tempfile
 logging.basicConfig(level=logging.INFO)
 
 # ======================
-# AUTH (env-based)
+# AUTH (env + fallback)
 # ======================
-APP_USER = os.getenv("APP_USER")
-APP_PASS = os.getenv("APP_PASS")
+APP_USER = os.getenv("APP_USER", "veera")
+APP_PASS = os.getenv("APP_PASS", "ai2026")
 
 def login():
     st.subheader("🔐 Login")
@@ -60,18 +66,23 @@ INDEX_FILE = "memory.index"
 CHUNKS_FILE = "memory_chunks.pkl"
 
 def load_memory():
-    if os.path.exists(INDEX_FILE) and os.path.exists(CHUNKS_FILE):
-        index = faiss.read_index(INDEX_FILE)
-        with open(CHUNKS_FILE, "rb") as f:
-            chunks = pickle.load(f)
-        return index, chunks
-    else:
-        return faiss.IndexFlatIP(DIM), []
+    try:
+        if os.path.exists(INDEX_FILE) and os.path.exists(CHUNKS_FILE):
+            index = faiss.read_index(INDEX_FILE)
+            with open(CHUNKS_FILE, "rb") as f:
+                chunks = pickle.load(f)
+            return index, chunks
+    except:
+        logging.warning("Memory load failed, creating new memory.")
+    return faiss.IndexFlatIP(DIM), []
 
 def save_memory(index, chunks):
-    faiss.write_index(index, INDEX_FILE)
-    with open(CHUNKS_FILE, "wb") as f:
-        pickle.dump(chunks, f)
+    try:
+        faiss.write_index(index, INDEX_FILE)
+        with open(CHUNKS_FILE, "wb") as f:
+            pickle.dump(chunks, f)
+    except:
+        logging.warning("Memory save failed.")
 
 if "index" not in st.session_state:
     idx, ch = load_memory()
@@ -119,7 +130,7 @@ def call_ai(system, user, retries=2):
                     "model": MODEL,
                     "messages": [
                         {"role": "system", "content": system},
-                        {"role": "user", "content": user}
+                        {"role": "user", "content": user[:6000]}
                     ]
                 },
                 timeout=60
@@ -153,25 +164,22 @@ AGENTS = {
 
 def agent_workflow(q, context):
     outputs = {}
-    context = context[-4000:]  # limit context size
+    context = context[-4000:]
 
-    stages = [
-        ["planner", "researcher"],
-        ["architect", "tech_stack"],
-        ["backend", "frontend", "database"],
-        ["devops", "qa", "security", "performance"],
-        ["documentation"]
-    ]
+    progress = st.progress(0)
+    step = 0
+    total = len(AGENTS)
 
-    for stage in stages:
-        for agent in stage:
-            logging.info(f"Running agent: {agent}")
-            role = AGENTS[agent]
-            prompt = context + "\n" + q
-            result = call_ai(role, prompt)
-            outputs[agent] = result
-            context += f"\n\n{agent.upper()}:\n{result}"
-            time.sleep(0.3)  # rate limit protection
+    for agent, role in AGENTS.items():
+        logging.info(f"Running agent: {agent}")
+        prompt = context + "\n" + q
+        result = call_ai(role, prompt)
+        outputs[agent] = result
+        context += f"\n\n{agent.upper()}:\n{result}"
+
+        step += 1
+        progress.progress(step / total)
+        time.sleep(0.2)
 
     merged = "\n\n".join(
         f"{name.upper()}:\n{outputs[name]}"
@@ -187,16 +195,10 @@ def agent_workflow(q, context):
 # PROJECT GENERATOR
 # ======================
 def generate_project_code(idea):
-    return call_ai(
-        "Generate a simple working Streamlit app.",
-        idea
-    )
+    return call_ai("Generate a simple working Streamlit app.", idea)
 
 def generate_readme(idea):
-    return call_ai(
-        "Create a README for this project.",
-        idea
-    )
+    return call_ai("Create a README for this project.", idea)
 
 def create_project_zip(app_code, readme_text):
     temp_dir = tempfile.mkdtemp()
