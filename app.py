@@ -1,31 +1,51 @@
 import streamlit as st
-import os, time, faiss, numpy as np, logging, pickle, zipfile, tempfile
+import os, time, faiss, numpy as np, logging, pickle
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from groq import Groq
 import google.generativeai as genai
+import hashlib
 
 # ======================
 # LOAD ENV
 # ======================
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 
 # ======================
-# AUTH
+# MASTER PROMPT
+# ======================
+MASTER_PROMPT = """
+You are part of the Veera Enterprise AI System,
+a multi-agent digital workforce.
+
+Core rules:
+- Be accurate and professional.
+- Use structured outputs.
+- Avoid hallucinations.
+- Focus on enterprise-grade responses.
+"""
+
+# ======================
+# AUTH (secure hash)
 # ======================
 APP_USER = os.getenv("APP_USER", "veera")
-APP_PASS = os.getenv("APP_PASS", "ai2026")
+APP_PASS_HASH = os.getenv(
+    "APP_PASS_HASH",
+    hashlib.sha256("ai2026".encode()).hexdigest()
+)
+
+def check_password(p):
+    return hashlib.sha256(p.encode()).hexdigest() == APP_PASS_HASH
 
 def login():
     st.subheader("🔐 Login")
     u = st.text_input("Username")
     p = st.text_input("Password", type="password")
     if st.button("Login"):
-        if u == APP_USER and p == APP_PASS:
+        if u == APP_USER and check_password(p):
             st.session_state.user = u
             st.rerun()
         else:
@@ -36,7 +56,7 @@ if "user" not in st.session_state:
     st.stop()
 
 # ======================
-# AI CONFIG (Secrets + Env)
+# AI CONFIG
 # ======================
 def get_secret(name):
     return st.secrets.get(name) or os.getenv(name)
@@ -71,6 +91,7 @@ embedder, DIM = load_embedder()
 # ======================
 INDEX_FILE = "memory.index"
 CHUNKS_FILE = "memory_chunks.pkl"
+MAX_CHUNKS = 5000
 
 def load_memory():
     try:
@@ -108,6 +129,10 @@ def add_to_memory(text):
     vecs = embedder.encode(chunks, normalize_embeddings=True)
     st.session_state.index.add(vecs.astype("float32"))
     st.session_state.doc_chunks.extend(chunks)
+
+    if len(st.session_state.doc_chunks) > MAX_CHUNKS:
+        st.session_state.doc_chunks = st.session_state.doc_chunks[-MAX_CHUNKS:]
+
     save_memory(st.session_state.index, st.session_state.doc_chunks)
 
 def search_memory(q, k=4):
@@ -125,7 +150,8 @@ def search_memory(q, k=4):
 # AI CALL
 # ======================
 def call_ai(system, user, retries=2):
-    prompt = f"{system}\n\n{user[:6000]}"
+    system_prompt = MASTER_PROMPT + "\n\n" + system
+    prompt = f"{system_prompt}\n\n{user[:6000]}"
 
     # GROQ
     if groq_client:
@@ -134,9 +160,9 @@ def call_ai(system, user, retries=2):
                 resp = groq_client.chat.completions.create(
                     model="llama-3.1-8b-instant",
                     messages=[
-                        {"role": "system", "content": system},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user[:6000]}
-                    ]
+                    ],
                 )
                 return resp.choices[0].message.content
             except Exception as e:
@@ -156,21 +182,21 @@ def call_ai(system, user, retries=2):
     return "⚠️ AI service unavailable"
 
 # ======================
-# AGENTS
+# 12 AGENTS
 # ======================
 AGENTS = {
-    "planner": "Break the task into modules",
-    "researcher": "Provide domain insights",
-    "architect": "Design architecture",
-    "tech_stack": "Select tech stack",
-    "backend": "Design backend APIs",
-    "frontend": "Design frontend UI",
-    "database": "Design database schema",
-    "devops": "Provide deployment plan",
-    "qa": "Create test strategy",
-    "security": "Identify security risks",
-    "performance": "Suggest optimizations",
-    "documentation": "Generate final summary"
+    "planner": "Break the task into modules.",
+    "researcher": "Provide domain insights.",
+    "architect": "Design system architecture.",
+    "tech_stack": "Select appropriate technologies.",
+    "backend": "Design backend APIs.",
+    "frontend": "Design frontend UI.",
+    "database": "Design database schema.",
+    "devops": "Provide deployment plan.",
+    "qa": "Create testing strategy.",
+    "security": "Identify security risks.",
+    "performance": "Suggest optimizations.",
+    "documentation": "Generate final summary."
 }
 
 def agent_workflow(q, context):
@@ -194,7 +220,7 @@ def agent_workflow(q, context):
     )
 
     return call_ai(
-        "Combine into a single enterprise-grade response",
+        "Combine all agent outputs into one enterprise-grade response.",
         merged
     )
 
@@ -204,11 +230,37 @@ def agent_workflow(q, context):
 st.set_page_config("Veera Enterprise AI Platform", layout="wide")
 st.title("🚀 Veera Enterprise AI Platform")
 
-if st.sidebar.button("🧹 Clear Memory"):
-    st.session_state.index = faiss.IndexFlatIP(DIM)
-    st.session_state.doc_chunks = []
-    save_memory(st.session_state.index, [])
-    st.sidebar.success("Memory cleared")
+# Sidebar AI status
+st.sidebar.markdown("### 🔑 AI Status")
+st.sidebar.write("Groq:", "✅" if GROQ_API_KEY else "❌")
+st.sidebar.write("Gemini:", "✅" if GEMINI_API_KEY else "❌")
+
+# ======================
+# CODE LAB
+# ======================
+st.sidebar.markdown("### 🧪 Code Lab")
+test_prompt = st.sidebar.text_input("Test Prompt", "Hello")
+
+if st.sidebar.button("Test Groq"):
+    if groq_client:
+        try:
+            r = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": test_prompt}]
+            )
+            st.sidebar.success("Groq working")
+            st.sidebar.write(r.choices[0].message.content)
+        except:
+            st.sidebar.error("Groq failed")
+
+if st.sidebar.button("Test Gemini"):
+    if gemini_model:
+        try:
+            r = gemini_model.generate_content(test_prompt)
+            st.sidebar.success("Gemini working")
+            st.sidebar.write(r.text)
+        except:
+            st.sidebar.error("Gemini failed")
 
 tabs = st.tabs([
     "💬 AI Chat",
