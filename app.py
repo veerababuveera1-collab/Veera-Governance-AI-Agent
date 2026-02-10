@@ -6,6 +6,8 @@ import streamlit.components.v1 as components
 import zipfile
 import tempfile
 from dotenv import load_dotenv
+from groq import Groq
+import google.generativeai as genai
 
 # ======================
 # LOAD ENV
@@ -39,15 +41,22 @@ if "user" not in st.session_state:
     st.stop()
 
 # ======================
-# CONFIG
+# AI CONFIG (Groq + Gemini)
 # ======================
-API_KEY = os.getenv("OPENROUTER_API_KEY")
-if not API_KEY:
-    st.error("Missing OPENROUTER_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not GROQ_API_KEY and not GEMINI_API_KEY:
+    st.error("No AI keys found. Add GROQ_API_KEY or GEMINI_API_KEY.")
     st.stop()
 
-URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "meta-llama/llama-3-70b-instruct"
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    gemini_model = None
 
 # ======================
 # EMBEDDINGS
@@ -115,33 +124,37 @@ def search_memory(q, k=4):
     )
 
 # ======================
-# AI CALL (SAFE)
+# AI CALL (Groq + Gemini fallback)
 # ======================
 def call_ai(system, user, retries=2):
-    for _ in range(retries):
-        try:
-            r = requests.post(
-                URL,
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": MODEL,
-                    "messages": [
+    prompt = f"{system}\n\n{user[:6000]}"
+
+    # ---- GROQ FIRST ----
+    if groq_client:
+        for _ in range(retries):
+            try:
+                resp = groq_client.chat.completions.create(
+                    model="llama3-70b-8192",
+                    messages=[
                         {"role": "system", "content": system},
                         {"role": "user", "content": user[:6000]}
                     ]
-                },
-                timeout=60
-            )
-            if r.status_code == 200:
-                data = r.json()
-                if "choices" in data:
-                    return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            logging.warning(f"AI call failed: {e}")
-            time.sleep(1)
+                )
+                return resp.choices[0].message.content
+            except Exception as e:
+                logging.warning(f"Groq failed: {e}")
+                time.sleep(1)
+
+    # ---- GEMINI FALLBACK ----
+    if gemini_model:
+        for _ in range(retries):
+            try:
+                resp = gemini_model.generate_content(prompt)
+                return resp.text
+            except Exception as e:
+                logging.warning(f"Gemini failed: {e}")
+                time.sleep(1)
+
     return "⚠️ AI service unavailable"
 
 # ======================
