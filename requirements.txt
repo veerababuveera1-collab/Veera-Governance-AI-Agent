@@ -1,7 +1,6 @@
 streamlit
-requests
-faiss-cpu
-numpy
-pypdf
+groq
 sentence-transformers
+faiss-cpu
+requests
 python-dotenv
