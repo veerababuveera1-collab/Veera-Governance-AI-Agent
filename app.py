@@ -1,8 +1,11 @@
 import streamlit as st
-import os, time, logging, zipfile, tempfile, hashlib
+import os, time, logging, zipfile, tempfile, hashlib, faiss, pickle
 from dotenv import load_dotenv
 from groq import Groq
 import google.generativeai as genai
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
+import streamlit.components.v1 as components
 
 # ======================
 # LOAD ENV
@@ -139,76 +142,105 @@ def agent_workflow(task):
         for name in outputs
     )
 
-    return call_ai(
-        """Combine into structured sections:
-1. Overview
-2. Modules
-3. Tech Stack
-4. Architecture
-5. Database
-6. APIs
-7. Deployment
-8. Security
-9. Testing
-10. Summary
-""",
-        merged
+    return call_ai("Combine into structured enterprise response.", merged)
+
+# ======================
+# MEMORY (FAISS)
+# ======================
+@st.cache_resource
+def load_embedder():
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    return model, model.get_sentence_embedding_dimension()
+
+embedder, DIM = load_embedder()
+INDEX_FILE = "memory.index"
+CHUNKS_FILE = "memory_chunks.pkl"
+
+def load_memory():
+    try:
+        if os.path.exists(INDEX_FILE) and os.path.exists(CHUNKS_FILE):
+            index = faiss.read_index(INDEX_FILE)
+            with open(CHUNKS_FILE, "rb") as f:
+                chunks = pickle.load(f)
+            return index, chunks
+    except:
+        pass
+    return faiss.IndexFlatIP(DIM), []
+
+if "index" not in st.session_state:
+    st.session_state.index, st.session_state.doc_chunks = load_memory()
+
+def add_to_memory(text):
+    chunks = text.split("\n")
+    vecs = embedder.encode(chunks, normalize_embeddings=True)
+    st.session_state.index.add(vecs.astype("float32"))
+    st.session_state.doc_chunks.extend(chunks)
+
+def search_memory(q, k=4):
+    if st.session_state.index.ntotal == 0:
+        return ""
+    qv = embedder.encode([q], normalize_embeddings=True).astype("float32")
+    _, ids = st.session_state.index.search(qv, k)
+    return "\n".join(
+        st.session_state.doc_chunks[i]
+        for i in ids[0]
+        if i < len(st.session_state.doc_chunks)
     )
 
 # ======================
-# PROJECT GENERATOR
+# SMART PROJECT GENERATOR
 # ======================
-def generate_backend(idea):
-    return call_ai("Generate backend code (Python/Flask or FastAPI).", idea)
-
-def generate_frontend(idea):
-    return call_ai("Generate simple frontend HTML interface.", idea)
-
-def generate_database(idea):
-    return call_ai("Generate database models.", idea)
-
-def generate_readme(idea):
-    return call_ai("Create a professional README.", idea)
-
-def create_project_zip(idea):
+def create_project_zip(idea, tech):
     temp_dir = tempfile.mkdtemp()
-    project_path = os.path.join(temp_dir, "project")
-    os.makedirs(project_path, exist_ok=True)
+    project_dir = os.path.join(temp_dir, "project")
+    os.makedirs(project_dir, exist_ok=True)
 
-    backend_dir = os.path.join(project_path, "backend")
-    frontend_dir = os.path.join(project_path, "frontend")
-    db_dir = os.path.join(project_path, "database")
+    if tech == "Python - FastAPI":
+        os.makedirs(os.path.join(project_dir, "app"), exist_ok=True)
+        code = call_ai("Generate FastAPI main.py.", idea)
+        with open(os.path.join(project_dir, "app", "main.py"), "w") as f:
+            f.write(code)
+        with open(os.path.join(project_dir, "requirements.txt"), "w") as f:
+            f.write("fastapi\nuvicorn\n")
 
-    os.makedirs(backend_dir)
-    os.makedirs(frontend_dir)
-    os.makedirs(db_dir)
+    elif tech == "Python - Flask":
+        code = call_ai("Generate Flask app.py.", idea)
+        with open(os.path.join(project_dir, "app.py"), "w") as f:
+            f.write(code)
+        with open(os.path.join(project_dir, "requirements.txt"), "w") as f:
+            f.write("flask\n")
 
-    backend = generate_backend(idea)
-    frontend = generate_frontend(idea)
-    database = generate_database(idea)
-    readme = generate_readme(idea)
+    elif tech == "Python - Streamlit":
+        code = call_ai("Generate Streamlit app.py.", idea)
+        with open(os.path.join(project_dir, "app.py"), "w") as f:
+            f.write(code)
+        with open(os.path.join(project_dir, "requirements.txt"), "w") as f:
+            f.write("streamlit\n")
 
-    with open(os.path.join(backend_dir, "app.py"), "w") as f:
-        f.write(backend)
+    elif tech == "Node.js - Express":
+        code = call_ai("Generate Node.js Express app.js.", idea)
+        with open(os.path.join(project_dir, "app.js"), "w") as f:
+            f.write(code)
+        with open(os.path.join(project_dir, "package.json"), "w") as f:
+            f.write("""{
+  "name": "ai-project",
+  "version": "1.0.0",
+  "main": "app.js",
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}""")
 
-    with open(os.path.join(frontend_dir, "index.html"), "w") as f:
-        f.write(frontend)
-
-    with open(os.path.join(db_dir, "models.py"), "w") as f:
-        f.write(database)
-
-    with open(os.path.join(project_path, "requirements.txt"), "w") as f:
-        f.write("fastapi\nflask\nstreamlit\n")
-
-    with open(os.path.join(project_path, "README.md"), "w") as f:
+    readme = call_ai("Create a README with run instructions.", idea)
+    with open(os.path.join(project_dir, "README.md"), "w") as f:
         f.write(readme)
 
     zip_path = os.path.join(temp_dir, "project.zip")
     with zipfile.ZipFile(zip_path, "w") as zipf:
-        for root, _, files in os.walk(project_path):
+        for root, _, files in os.walk(project_dir):
             for file in files:
                 fp = os.path.join(root, file)
-                zipf.write(fp, os.path.relpath(fp, project_path))
+                zipf.write(fp, os.path.relpath(fp, project_dir))
 
     return zip_path
 
@@ -219,35 +251,78 @@ st.set_page_config("Veera Enterprise AI", layout="wide")
 st.title("🚀 Veera Enterprise AI Platform")
 
 tabs = st.tabs([
+    "💬 AI Chat",
+    "📄 Document Memory",
+    "🎤 Voice Reply",
+    "⚙️ Automation",
     "🏗 Project Architecture",
     "🧪 Code Lab"
 ])
 
-# TAB 1: ARCHITECTURE
+# AI CHAT
 with tabs[0]:
-    st.subheader("Project Architecture Generator")
-    idea = st.text_area("Describe entire project")
+    q = st.chat_input("Ask anything...")
+    if q:
+        ans = call_ai("General assistant.", q)
+        st.write(ans)
 
-    if st.button("Generate Architecture"):
-        if idea.strip():
-            with st.spinner("Designing architecture..."):
-                result = agent_workflow(idea)
-            st.markdown(result)
-
-# TAB 2: CODE LAB
+# MEMORY
 with tabs[1]:
-    st.subheader("Project Code Generator")
+    f = st.file_uploader("Upload PDF", type="pdf")
+    if f:
+        text = "".join(
+            p.extract_text() for p in PdfReader(f).pages if p.extract_text()
+        )
+        add_to_memory(text)
+        st.success("Document stored")
+
+# VOICE
+with tabs[2]:
+    voice_q = st.text_input("Ask for voice reply")
+    if voice_q:
+        ans = call_ai("Voice assistant.", voice_q)
+        st.write(ans)
+        components.html(f"""
+        <script>
+        const msg = new SpeechSynthesisUtterance({repr(ans)});
+        window.speechSynthesis.speak(msg);
+        </script>
+        """, height=0)
+
+# AUTOMATION
+with tabs[3]:
+    task = st.text_area("Describe task")
+    if st.button("Run Automation"):
+        result = agent_workflow(task)
+        st.write(result)
+
+# ARCHITECTURE
+with tabs[4]:
+    idea = st.text_area("Describe entire project")
+    if st.button("Generate Architecture"):
+        result = agent_workflow(idea)
+        st.write(result)
+
+# CODE LAB
+with tabs[5]:
+    tech = st.selectbox(
+        "Select Technology",
+        [
+            "Python - FastAPI",
+            "Python - Flask",
+            "Python - Streamlit",
+            "Node.js - Express"
+        ]
+    )
+
     idea = st.text_area("Describe project for code generation")
 
     if st.button("Generate Project Code"):
-        if idea.strip():
-            with st.spinner("Generating full project..."):
-                zip_path = create_project_zip(idea)
-
-            with open(zip_path, "rb") as f:
-                st.download_button(
-                    "⬇️ Download Project ZIP",
-                    data=f,
-                    file_name="project.zip",
-                    mime="application/zip"
-                )
+        zip_path = create_project_zip(idea, tech)
+        with open(zip_path, "rb") as f:
+            st.download_button(
+                "⬇️ Download Project ZIP",
+                data=f,
+                file_name="project.zip",
+                mime="application/zip"
+            )
