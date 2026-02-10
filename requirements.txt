@@ -1,9 +1,8 @@
 streamlit
 groq
+google-generativeai
 sentence-transformers
 faiss-cpu
-requests
-python-dotenv
 pypdf
+python-dotenv
 numpy
-google-generativeai
